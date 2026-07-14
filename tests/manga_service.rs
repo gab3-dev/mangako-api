@@ -160,16 +160,18 @@ async fn empty_search_uses_mangadex_popular_page_parameters() {
 }
 
 #[tokio::test]
-async fn description_without_same_language_title_is_preserved() {
+async fn alternate_titles_populate_localized_titles_without_losing_descriptions() {
     let pool = test_pool().await;
     let mangadex_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
     cleanup_manga(&pool, mangadex_id).await;
 
     let mut remote = mangadex_manga(mangadex_id, "English Title");
-    remote
-        .attributes
-        .title
-        .insert("pt-br".to_string(), Some("Titulo em portugues".to_string()));
+    remote.attributes.alt_titles = vec![
+        HashMap::from([("en".to_string(), Some("English Alias".to_string()))]),
+        HashMap::from([("pt-BR".to_string(), Some("Titulo em portugues".to_string()))]),
+        HashMap::from([("es".to_string(), Some("Titulo en espanol".to_string()))]),
+        HashMap::from([("ar".to_string(), Some("عنوان عربي".to_string()))]),
+    ];
     remote.attributes.description.insert(
         "pt-BR".to_string(),
         Some("Descricao em portugues".to_string()),
@@ -205,11 +207,24 @@ async fn description_without_same_language_title_is_preserved() {
         .iter()
         .find(|localization| localization.language == "es")
         .unwrap();
-    assert_eq!(spanish.title, None);
+    assert_eq!(spanish.title.as_deref(), Some("Titulo en espanol"));
     assert_eq!(
         spanish.description.as_deref(),
         Some("Descripcion sin titulo")
     );
+    let english = results[0]
+        .localizations
+        .iter()
+        .find(|localization| localization.language == "en")
+        .unwrap();
+    assert_eq!(english.title.as_deref(), Some("English Title"));
+    let arabic = results[0]
+        .localizations
+        .iter()
+        .find(|localization| localization.language == "ar")
+        .unwrap();
+    assert_eq!(arabic.title.as_deref(), Some("عنوان عربي"));
+    assert_eq!(arabic.description, None);
     cleanup_manga(&pool, mangadex_id).await;
 }
 

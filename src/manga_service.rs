@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -457,34 +457,61 @@ async fn upsert_localizations(
     manga: &MangaDexManga,
 ) -> Result<(), sqlx::Error> {
     let primary_language = primary_language(manga);
-    let mut languages = BTreeSet::new();
-    languages.extend(manga.attributes.title.keys().cloned());
-    languages.extend(manga.attributes.description.keys().cloned());
     let mut localizations = BTreeMap::<String, (Option<String>, Option<String>)>::new();
 
-    for language in languages {
-        let title = manga
-            .attributes
-            .title
-            .get(&language)
-            .and_then(|title| title.as_ref())
+    let mut canonical_titles = manga.attributes.title.iter().collect::<Vec<_>>();
+    canonical_titles.sort_by_key(|(language, _)| language.to_ascii_lowercase());
+    for (language, title) in canonical_titles {
+        let Some(title) = title
+            .as_ref()
             .filter(|title| !title.trim().is_empty())
-            .cloned();
-        let description = manga
-            .attributes
-            .description
-            .get(&language)
-            .and_then(|description| description.as_ref())
-            .filter(|description| !description.trim().is_empty())
-            .cloned();
+            .cloned()
+        else {
+            continue;
+        };
         let entry = localizations
             .entry(language.to_ascii_lowercase())
             .or_default();
         if entry.0.is_none() {
-            entry.0 = title;
+            entry.0 = Some(title);
         }
+    }
+
+    for alternate_titles in &manga.attributes.alt_titles {
+        let mut alternate_titles = alternate_titles.iter().collect::<Vec<_>>();
+        alternate_titles.sort_by_key(|(language, _)| language.to_ascii_lowercase());
+        for (language, title) in alternate_titles {
+            let Some(title) = title
+                .as_ref()
+                .filter(|title| !title.trim().is_empty())
+                .cloned()
+            else {
+                continue;
+            };
+            let entry = localizations
+                .entry(language.to_ascii_lowercase())
+                .or_default();
+            if entry.0.is_none() {
+                entry.0 = Some(title);
+            }
+        }
+    }
+
+    let mut descriptions = manga.attributes.description.iter().collect::<Vec<_>>();
+    descriptions.sort_by_key(|(language, _)| language.to_ascii_lowercase());
+    for (language, description) in descriptions {
+        let Some(description) = description
+            .as_ref()
+            .filter(|description| !description.trim().is_empty())
+            .cloned()
+        else {
+            continue;
+        };
+        let entry = localizations
+            .entry(language.to_ascii_lowercase())
+            .or_default();
         if entry.1.is_none() {
-            entry.1 = description;
+            entry.1 = Some(description);
         }
     }
 
