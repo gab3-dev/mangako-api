@@ -1,0 +1,5 @@
+/target
+.ai-jail
+.env
+.env.*
+!.env.example

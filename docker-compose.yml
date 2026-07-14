@@ -1,0 +1,44 @@
+services:
+  api:
+    image: ${MANGAKO_API_IMAGE:-mangako-api:local}
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://mangako:mangako@postgres:5432/mangako_api
+      HTTP_ADDR: 0.0.0.0:3000
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN before starting the API}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
+      CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-1000}
+      CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-67108864}
+      RUST_LOG: ${RUST_LOG:-mangako_api=info,tower_http=info}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mangako_api
+      POSTGRES_USER: mangako
+      POSTGRES_PASSWORD: mangako
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mangako -d mangako_api"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
