@@ -1,6 +1,6 @@
 # Deploy em servidor ARM64
 
-A API, PostgreSQL e todas as imagens base usadas pelo projeto suportam `linux/arm64`. O workflow `.github/workflows/ci.yml` testa o stack em runner ARM64 e publica uma imagem multi-arquitetura no GitHub Container Registry.
+A API, PostgreSQL e todas as imagens base usadas pelo projeto suportam `linux/arm64`. O workflow `.github/workflows/ci.yml` testa o stack em runner ARM64 e, após os testes, chama `.github/workflows/docker.yml` para publicar uma imagem multi-arquitetura no GitHub Container Registry. O workflow de imagem também pode ser executado manualmente pelo GitHub Actions.
 
 ## Imagem multi-arquitetura
 
