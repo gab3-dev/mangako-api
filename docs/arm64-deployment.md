@@ -24,25 +24,38 @@ O pacote GHCR precisa estar público ou o servidor deve executar `docker login g
 
 ## Execução no servidor ARM64
 
-Defina a imagem publicada e o token:
+Crie o arquivo de ambiente de produção a partir de `.env.production.example` e substitua `POSTGRES_PASSWORD` e `API_TOKEN` por valores aleatórios. Por padrão, o Compose usa a imagem multi-arquitetura publicada pelo workflow:
 
 ```sh
-export MANGAKO_API_IMAGE='ghcr.io/OWNER/REPOSITORY:latest'
-export API_TOKEN='replace-with-a-random-token'
+MANGAKO_API_IMAGE='ghcr.io/gab3-dev/mangako-api:latest'
 ```
 
 Baixe as imagens e suba o stack sem recompilar no servidor:
 
 ```sh
-docker compose pull api postgres
-docker compose up -d --no-build --wait
+docker compose --env-file .env.production -f docker-compose.prod.yml pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --wait
+```
+
+O PostgreSQL fica acessível somente na rede interna do Compose. A API não publica portas no host: apenas o Caddy pode acessá-la como `api:3000` pela rede Docker `edge`.
+
+## HTTPS com Caddy e Cloudflare
+
+O serviço `caddy` usa `deploy/Caddyfile` para publicar `mangako-api.kostudio.io`, redirecionar HTTP para HTTPS e encaminhar as requisições para `api:3000`. Caddy emite e renova automaticamente o certificado da origem. Os volumes `caddy-data` e `caddy-config` preservam certificados e estado entre atualizações dos containers.
+
+No Cloudflare, mantenha o proxy DNS ativo e configure SSL/TLS como `Full (strict)`. As portas TCP `80` e `443` devem aceitar tráfego na origem; UDP `443` é opcional para HTTP/3. A porta `3000` não deve ser exposta publicamente.
+
+Valide o endpoint público:
+
+```sh
+curl --fail https://mangako-api.kostudio.io/health
 ```
 
 Confirme a arquitetura e a saúde:
 
 ```sh
 docker image inspect "$MANGAKO_API_IMAGE" --format '{{.Architecture}}/{{.Os}}'
-curl --fail http://localhost:3000/health
+curl --fail https://mangako-api.kostudio.io/health
 ```
 
 O resultado esperado no servidor é `arm64/linux` e `ok`.

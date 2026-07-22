@@ -1,0 +1,104 @@
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - edge
+
+  api:
+    image: ${MANGAKO_API_IMAGE:-ghcr.io/gab3-dev/mangako-api:latest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mangako}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mangako_api}
+      HTTP_ADDR: 0.0.0.0:3000
+      API_TOKEN: ${API_TOKEN:?set API_TOKEN}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
+      CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-1000}
+      CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-67108864}
+      RUST_LOG: ${RUST_LOG:-mangako_api=info,tower_http=info}
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - edge
+      - database
+
+  postgres:
+    image: postgres:18-alpine
+    pull_policy: missing
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mangako_api}
+      POSTGRES_USER: ${POSTGRES_USER:-mangako}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - database
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:
+
+networks:
+  edge:
+  database:
+    internal: true
