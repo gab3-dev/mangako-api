@@ -55,6 +55,18 @@ impl MangaDexApi for FakeMangaDex {
             Ok(Vec::new())
         }
     }
+
+    async fn latest_volume_number(&self, manga_id: Uuid) -> Result<Option<String>, reqwest::Error> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("latest_volume_number:{manga_id}"));
+        Ok(self
+            .covers
+            .iter()
+            .find(|cover| cover.attributes.locale.as_deref() == Some("ja"))
+            .and_then(|cover| cover.attributes.volume.clone()))
+    }
 }
 
 #[tokio::test]
@@ -155,6 +167,106 @@ async fn empty_search_uses_mangadex_popular_page_parameters() {
     assert_eq!(
         fake.calls.lock().unwrap().as_slice(),
         ["search_mangas:None:18:6"]
+    );
+    cleanup_manga(&pool, mangadex_id).await;
+}
+
+#[tokio::test]
+async fn search_fetches_latest_volume_without_synchronizing_all_covers() {
+    let pool = test_pool().await;
+    let mangadex_id = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+    cleanup_manga(&pool, mangadex_id).await;
+
+    let mut remote = mangadex_manga(mangadex_id, "Missing Last Volume");
+    remote.attributes.last_volume = None;
+    let fake = FakeMangaDex {
+        calls: Arc::default(),
+        search_results: vec![remote],
+        covers: vec![MangaDexCover {
+            id: Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap(),
+            attributes: MangaDexCoverAttributes {
+                file_name: "volume-18.jpg".to_string(),
+                volume: Some("18".to_string()),
+                locale: Some("ja".to_string()),
+                created_at: None,
+                updated_at: None,
+                version: Some(1),
+            },
+        }],
+    };
+    let service = MangaService::new(pool.clone(), fake.clone());
+
+    let results = service
+        .search_mangas(Some("Missing Last Volume"), 10, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(results[0].latest_volume_number.as_deref(), Some("18"));
+    assert_eq!(
+        fake.calls.lock().unwrap().as_slice(),
+        [
+            "search_mangas:Some(\"Missing Last Volume\"):0:10",
+            "latest_volume_number:66666666-6666-6666-6666-666666666666",
+        ]
+    );
+    let persisted_volumes: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM manga_volumes mv
+        JOIN mangas m ON m.id = mv.manga_id
+        WHERE m.mangadex_id = $1
+        "#,
+    )
+    .bind(mangadex_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_volumes, 0);
+    cleanup_manga(&pool, mangadex_id).await;
+}
+
+#[tokio::test]
+async fn fresh_local_manga_fetches_latest_volume_when_it_is_missing() {
+    let pool = test_pool().await;
+    let mangadex_id = Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap();
+    cleanup_manga(&pool, mangadex_id).await;
+    sqlx::query(
+        r#"
+        INSERT INTO mangas (mangadex_id, slug, primary_title, last_synced_at)
+        VALUES ($1, 'missing-volume-77777777', 'Missing Volume', now())
+        "#,
+    )
+    .bind(mangadex_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let fake = FakeMangaDex {
+        calls: Arc::default(),
+        search_results: Vec::new(),
+        covers: vec![MangaDexCover {
+            id: Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").unwrap(),
+            attributes: MangaDexCoverAttributes {
+                file_name: "volume-9.jpg".to_string(),
+                volume: Some("9".to_string()),
+                locale: Some("ja".to_string()),
+                created_at: None,
+                updated_at: None,
+                version: Some(1),
+            },
+        }],
+    };
+    let service = MangaService::new(pool.clone(), fake.clone());
+
+    let manga = service
+        .get_manga(&mangadex_id.to_string(), false)
+        .await
+        .unwrap();
+
+    assert_eq!(manga.latest_volume_number.as_deref(), Some("9"));
+    assert_eq!(
+        fake.calls.lock().unwrap().as_slice(),
+        ["latest_volume_number:77777777-7777-7777-7777-777777777777"]
     );
     cleanup_manga(&pool, mangadex_id).await;
 }

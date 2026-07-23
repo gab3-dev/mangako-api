@@ -34,14 +34,15 @@ where
                 .last_synced_at
                 .is_none_or(|synced| synced < Utc::now() - Duration::days(1));
             if !refresh && !stale {
-                return Ok(local);
+                return self.populate_local_latest_volume(local).await;
             }
 
             let Some(mangadex_id) = local.mangadex_id else {
                 return Ok(local);
             };
             match self.mangadex.get_manga(mangadex_id).await {
-                Ok(Some(remote)) => {
+                Ok(Some(mut remote)) => {
+                    self.populate_remote_latest_volume(&mut remote).await;
                     self.upsert_mangadex_manga(&remote).await?;
                     return load_manga_response(&self.pool, &remote.id.to_string())
                         .await?
@@ -56,12 +57,13 @@ where
         }
 
         let mangadex_id = Uuid::parse_str(manga_ref).map_err(|_| ApiError::MangaNotFound)?;
-        let remote = self
+        let mut remote = self
             .mangadex
             .get_manga(mangadex_id)
             .await?
             .ok_or(ApiError::MangaNotFound)?;
 
+        self.populate_remote_latest_volume(&mut remote).await;
         self.upsert_mangadex_manga(&remote).await?;
 
         load_manga_response(&self.pool, &remote.id.to_string())
@@ -86,7 +88,8 @@ where
         };
 
         let mut results = Vec::with_capacity(remote_results.len());
-        for remote in remote_results {
+        for mut remote in remote_results {
+            self.populate_remote_latest_volume(&mut remote).await;
             self.upsert_mangadex_manga(&remote).await?;
             if let Some(manga) = load_manga_response(&self.pool, &remote.id.to_string()).await? {
                 results.push(manga);
@@ -127,6 +130,60 @@ where
             .map_err(ApiError::from)
     }
 
+    async fn populate_local_latest_volume(
+        &self,
+        local: MangaResponse,
+    ) -> Result<MangaResponse, ApiError> {
+        if local.latest_volume_number.is_some() {
+            return Ok(local);
+        }
+        let Some(mangadex_id) = local.mangadex_id else {
+            return Ok(local);
+        };
+        let Some(latest_volume) = self.fetch_latest_volume_number(mangadex_id).await else {
+            return Ok(local);
+        };
+
+        sqlx::query(
+            r#"
+            UPDATE mangas
+            SET mangadex_last_volume = $2
+            WHERE id = $1 AND mangadex_last_volume IS NULL
+            "#,
+        )
+        .bind(local.id)
+        .bind(latest_volume)
+        .execute(&self.pool)
+        .await?;
+
+        load_manga_response(&self.pool, &local.id.to_string())
+            .await?
+            .ok_or(ApiError::MangaNotFound)
+    }
+
+    async fn populate_remote_latest_volume(&self, manga: &mut MangaDexManga) {
+        if manga
+            .attributes
+            .last_volume
+            .as_deref()
+            .is_some_and(|volume| !volume.trim().is_empty())
+        {
+            return;
+        }
+
+        manga.attributes.last_volume = self.fetch_latest_volume_number(manga.id).await;
+    }
+
+    async fn fetch_latest_volume_number(&self, mangadex_id: Uuid) -> Option<String> {
+        match self.mangadex.latest_volume_number(mangadex_id).await {
+            Ok(volume) => volume.as_deref().and_then(normalized_volume_key),
+            Err(error) => {
+                tracing::warn!(%error, %mangadex_id, "MangaDex latest volume lookup failed");
+                None
+            }
+        }
+    }
+
     async fn upsert_mangadex_manga(&self, manga: &MangaDexManga) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let primary_title = primary_title(manga);
@@ -148,7 +205,10 @@ where
                 year = EXCLUDED.year,
                 content_rating = EXCLUDED.content_rating,
                 mangadex_version = EXCLUDED.mangadex_version,
-                mangadex_last_volume = EXCLUDED.mangadex_last_volume,
+                mangadex_last_volume = COALESCE(
+                    EXCLUDED.mangadex_last_volume,
+                    mangas.mangadex_last_volume
+                ),
                 source_updated_at = EXCLUDED.source_updated_at,
                 last_synced_at = now(),
                 deleted_at = NULL

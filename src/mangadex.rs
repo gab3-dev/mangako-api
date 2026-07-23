@@ -24,6 +24,11 @@ pub trait MangaDexApi: Clone + Send + Sync + 'static {
         offset: u32,
         limit: u32,
     ) -> impl Future<Output = Result<Vec<MangaDexCover>, reqwest::Error>> + Send;
+
+    fn latest_volume_number(
+        &self,
+        manga_id: Uuid,
+    ) -> impl Future<Output = Result<Option<String>, reqwest::Error>> + Send;
 }
 
 #[derive(Clone)]
@@ -112,6 +117,24 @@ impl MangaDexApi for MangaDexClient {
             .json::<CoverListResponse>()
             .await?
             .data)
+    }
+
+    async fn latest_volume_number(&self, manga_id: Uuid) -> Result<Option<String>, reqwest::Error> {
+        let response = self
+            .http
+            .get(format!("{}/cover", self.base_url))
+            .query(&latest_volume_query(manga_id))
+            .send()
+            .await?;
+
+        Ok(response
+            .error_for_status()?
+            .json::<CoverListResponse>()
+            .await?
+            .data
+            .into_iter()
+            .next()
+            .and_then(|cover| cover.attributes.volume))
     }
 }
 
@@ -224,6 +247,15 @@ fn manga_search_query(title: Option<&str>, offset: u32, limit: u32) -> Vec<(&str
     query
 }
 
+fn latest_volume_query(manga_id: Uuid) -> Vec<(&'static str, String)> {
+    vec![
+        ("limit", "1".to_string()),
+        ("manga[]", manga_id.to_string()),
+        ("locales[]", "ja".to_string()),
+        ("order[volume]", "desc".to_string()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,5 +276,16 @@ mod tests {
 
         assert!(query.contains(&("order[followedCount]", "desc".to_string())));
         assert!(!query.iter().any(|(key, _)| *key == "title"));
+    }
+
+    #[test]
+    fn latest_volume_query_requests_highest_japanese_volume_only() {
+        let manga_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let query = latest_volume_query(manga_id);
+
+        assert!(query.contains(&("limit", "1".to_string())));
+        assert!(query.contains(&("manga[]", manga_id.to_string())));
+        assert!(query.contains(&("locales[]", "ja".to_string())));
+        assert!(query.contains(&("order[volume]", "desc".to_string())));
     }
 }

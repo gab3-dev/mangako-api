@@ -84,7 +84,7 @@ The Docker base images and Rust dependencies support Linux ARM64. CI builds and 
 - `GET /mangas/{id_or_slug}?refresh=false`: requires API token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt. Stale local data is served if MangaDex is unavailable.
 - `GET /mangas/{id_or_slug}/volumes?limit=50&offset=0&refresh=false`: requires API token. Returns a stable page of volume covers. Missing or stale volume data is synchronized from MangaDex. `refresh=true` forces a complete refresh and reconciles removed covers.
 
-`MangaResponse.latestVolumeNumber` contains the highest synchronized numeric Japanese volume, falling back to MangaDex `lastVolume` before cover synchronization.
+`MangaResponse.latestVolumeNumber` contains the highest synchronized numeric Japanese volume. Before cover synchronization, it uses MangaDex `lastVolume` or performs a lightweight `limit=1` lookup for the highest Japanese cover volume when that field is absent.
 
 ## Initial Manga Catalog Model
 
