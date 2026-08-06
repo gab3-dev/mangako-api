@@ -272,6 +272,67 @@ async fn fresh_local_manga_fetches_latest_volume_when_it_is_missing() {
 }
 
 #[tokio::test]
+async fn volume_refresh_updates_latest_volume_number_in_following_manga_response() {
+    let pool = test_pool().await;
+    let mangadex_id = Uuid::parse_str("88888888-8888-8888-8888-888888888888").unwrap();
+    cleanup_manga(&pool, mangadex_id).await;
+    let manga_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO mangas (
+            mangadex_id, slug, primary_title, mangadex_last_volume, last_synced_at
+        )
+        VALUES ($1, 'new-volume-88888888', 'New Volume', '15', now())
+        RETURNING id
+        "#,
+    )
+    .bind(mangadex_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    let fake = FakeMangaDex {
+        calls: Arc::default(),
+        search_results: Vec::new(),
+        covers: vec![
+            manga_cover("cccccccc-cccc-cccc-cccc-cccccccccccc", "15"),
+            manga_cover("dddddddd-dddd-dddd-dddd-dddddddddddd", "16"),
+        ],
+    };
+    let service = MangaService::new(pool.clone(), fake);
+
+    let before = service
+        .get_manga(&mangadex_id.to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(before.latest_volume_number.as_deref(), Some("15"));
+
+    let volumes = service
+        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, true)
+        .await
+        .unwrap();
+    assert!(
+        volumes
+            .iter()
+            .any(|volume| volume.volume.as_deref() == Some("16"))
+    );
+
+    let after = service
+        .get_manga(&mangadex_id.to_string(), false)
+        .await
+        .unwrap();
+    assert_eq!(after.latest_volume_number.as_deref(), Some("16"));
+
+    let fallback: Option<String> =
+        sqlx::query_scalar("SELECT mangadex_last_volume FROM mangas WHERE id = $1")
+            .bind(manga_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(fallback.as_deref(), Some("15"));
+    cleanup_manga(&pool, mangadex_id).await;
+}
+
+#[tokio::test]
 async fn alternate_titles_populate_localized_titles_without_losing_descriptions() {
     let pool = test_pool().await;
     let mangadex_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
@@ -450,5 +511,19 @@ fn mangadex_manga(id: Uuid, title: &str) -> MangaDexManga {
             version: Some(1),
         },
         relationships: Vec::new(),
+    }
+}
+
+fn manga_cover(id: &str, volume: &str) -> MangaDexCover {
+    MangaDexCover {
+        id: Uuid::parse_str(id).unwrap(),
+        attributes: MangaDexCoverAttributes {
+            file_name: format!("volume-{volume}.jpg"),
+            volume: Some(volume.to_string()),
+            locale: Some("ja".to_string()),
+            created_at: None,
+            updated_at: None,
+            version: Some(1),
+        },
     }
 }
