@@ -94,7 +94,7 @@ async fn search_uses_mangadex_as_canonical_source() {
     let service = MangaService::new(pool.clone(), fake.clone());
 
     let results = service
-        .search_mangas(Some("Local Hit"), 6, 12)
+        .search_mangas(Some("Local Hit"), 6, 12, None)
         .await
         .unwrap();
 
@@ -123,7 +123,7 @@ async fn search_persists_and_returns_mangadex_fallback_results() {
     let service = MangaService::new(pool.clone(), fake.clone());
 
     let results = service
-        .search_mangas(Some("Remote Hit"), 10, 0)
+        .search_mangas(Some("Remote Hit"), 10, 0, None)
         .await
         .unwrap();
 
@@ -161,7 +161,7 @@ async fn empty_search_uses_mangadex_popular_page_parameters() {
     };
     let service = MangaService::new(pool.clone(), fake.clone());
 
-    let results = service.search_mangas(None, 6, 18).await.unwrap();
+    let results = service.search_mangas(None, 6, 18, None).await.unwrap();
 
     assert_eq!(results[0].primary_title, "Popular Hit");
     assert_eq!(
@@ -197,7 +197,7 @@ async fn search_fetches_latest_volume_without_synchronizing_all_covers() {
     let service = MangaService::new(pool.clone(), fake.clone());
 
     let results = service
-        .search_mangas(Some("Missing Last Volume"), 10, 0)
+        .search_mangas(Some("Missing Last Volume"), 10, 0, None)
         .await
         .unwrap();
 
@@ -259,7 +259,7 @@ async fn fresh_local_manga_fetches_latest_volume_when_it_is_missing() {
     let service = MangaService::new(pool.clone(), fake.clone());
 
     let manga = service
-        .get_manga(&mangadex_id.to_string(), false)
+        .get_manga(&mangadex_id.to_string(), false, None)
         .await
         .unwrap();
 
@@ -301,13 +301,13 @@ async fn volume_refresh_updates_latest_volume_number_in_following_manga_response
     let service = MangaService::new(pool.clone(), fake);
 
     let before = service
-        .get_manga(&mangadex_id.to_string(), false)
+        .get_manga(&mangadex_id.to_string(), false, None)
         .await
         .unwrap();
     assert_eq!(before.latest_volume_number.as_deref(), Some("15"));
 
     let volumes = service
-        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, true)
+        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, true, None)
         .await
         .unwrap();
     assert!(
@@ -317,7 +317,7 @@ async fn volume_refresh_updates_latest_volume_number_in_following_manga_response
     );
 
     let after = service
-        .get_manga(&mangadex_id.to_string(), false)
+        .get_manga(&mangadex_id.to_string(), false, None)
         .await
         .unwrap();
     assert_eq!(after.latest_volume_number.as_deref(), Some("16"));
@@ -361,7 +361,7 @@ async fn alternate_titles_populate_localized_titles_without_losing_descriptions(
     let service = MangaService::new(pool.clone(), fake);
 
     let results = service
-        .search_mangas(Some("English Title"), 10, 0)
+        .search_mangas(Some("English Title"), 10, 0, None)
         .await
         .unwrap();
     let portuguese = results[0]
@@ -453,7 +453,7 @@ async fn forced_volume_refresh_reconciles_removed_covers() {
     let service = MangaService::new(pool.clone(), fake);
 
     let volumes = service
-        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, true)
+        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, true, None)
         .await
         .unwrap();
 

@@ -65,7 +65,7 @@ async fn openapi_and_swagger_ui_are_served() {
     let search_parameters = openapi["paths"]["/mangas"]["get"]["parameters"]
         .as_array()
         .unwrap();
-    for parameter in ["title", "limit", "offset"] {
+    for parameter in ["title", "limit", "offset", "locale"] {
         assert!(
             search_parameters
                 .iter()

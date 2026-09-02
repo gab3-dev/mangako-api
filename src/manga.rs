@@ -127,12 +127,16 @@ pub struct SearchMangasQuery {
     pub limit: Option<u32>,
     /// Result offset. Defaults to 0 and is limited to 10000.
     pub offset: Option<u32>,
+    /// Preferred volume-cover locale used to calculate `latestVolumeNumber`.
+    pub locale: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
 pub struct MangaDetailQuery {
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
+    /// Preferred volume-cover locale used to calculate `latestVolumeNumber`.
+    pub locale: Option<String>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -143,6 +147,8 @@ pub struct MangaVolumesQuery {
     pub offset: Option<u32>,
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
+    /// Returns volume covers only for this locale.
+    pub locale: Option<String>,
 }
 
 #[utoipa::path(
@@ -166,9 +172,10 @@ pub async fn search_mangas(
         .as_deref()
         .map(str::trim)
         .filter(|title| !title.is_empty());
+    let locale = normalize_locale(query.locale.as_deref());
     let mangas = state
         .manga_service
-        .search_mangas(title, limit, offset)
+        .search_mangas(title, limit, offset, locale.as_deref())
         .await?;
     let mut response = Json(mangas).into_response();
     if title.is_none() {
@@ -198,9 +205,14 @@ pub async fn get_manga(
     axum::extract::Path(manga_ref): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MangaDetailQuery>,
 ) -> Result<Json<MangaResponse>, ApiError> {
+    let locale = normalize_locale(query.locale.as_deref());
     state
         .manga_service
-        .get_manga(&manga_ref, query.refresh.unwrap_or(false))
+        .get_manga(
+            &manga_ref,
+            query.refresh.unwrap_or(false),
+            locale.as_deref(),
+        )
         .await
         .map(Json)
 }
@@ -225,9 +237,16 @@ pub async fn get_manga_volumes(
     axum::extract::Query(query): axum::extract::Query<MangaVolumesQuery>,
 ) -> Result<Json<Vec<MangaVolumeResponse>>, ApiError> {
     let (limit, offset) = pagination(query.limit, query.offset, 50)?;
+    let locale = normalize_locale(query.locale.as_deref());
     state
         .manga_service
-        .get_manga_volumes(&manga_ref, limit, offset, query.refresh.unwrap_or(false))
+        .get_manga_volumes(
+            &manga_ref,
+            limit,
+            offset,
+            query.refresh.unwrap_or(false),
+            locale.as_deref(),
+        )
         .await
         .map(Json)
 }
@@ -235,6 +254,7 @@ pub async fn get_manga_volumes(
 pub async fn load_manga_response(
     pool: &PgPool,
     manga_ref: &str,
+    locale: Option<&str>,
 ) -> Result<Option<MangaResponse>, sqlx::Error> {
     let Some(manga) = find_manga(pool, manga_ref).await? else {
         return Ok(None);
@@ -246,7 +266,12 @@ pub async fn load_manga_response(
         list_covers(pool, manga.id),
         list_creators(pool, manga.id, "author"),
         list_creators(pool, manga.id, "artist"),
-        latest_volume_number(pool, manga.id, manga.mangadex_last_volume.as_deref()),
+        latest_volume_number(
+            pool,
+            manga.id,
+            manga.mangadex_last_volume.as_deref(),
+            locale
+        ),
     )?;
 
     Ok(Some(MangaResponse {
@@ -378,6 +403,7 @@ async fn latest_volume_number(
     pool: &PgPool,
     manga_id: Uuid,
     mangadex_last_volume: Option<&str>,
+    locale: Option<&str>,
 ) -> Result<Option<String>, sqlx::Error> {
     let synced: Option<String> = sqlx::query_scalar(
         r#"
@@ -385,15 +411,27 @@ async fn latest_volume_number(
         FROM manga_volumes
         WHERE manga_id = $1
           AND deleted_at IS NULL
-          AND lower(locale) = 'ja'
+          AND lower(locale) = COALESCE($2, 'ja')
           AND volume_key ~ '^[0-9]+([.][0-9]+)?$'
         "#,
     )
     .bind(manga_id)
+    .bind(locale)
     .fetch_one(pool)
     .await?;
 
-    Ok(synced.or_else(|| mangadex_last_volume.map(ToOwned::to_owned)))
+    if locale.is_some() {
+        Ok(synced)
+    } else {
+        Ok(synced.or_else(|| mangadex_last_volume.map(ToOwned::to_owned)))
+    }
+}
+
+fn normalize_locale(locale: Option<&str>) -> Option<String> {
+    locale
+        .map(str::trim)
+        .filter(|locale| !locale.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 fn pagination(

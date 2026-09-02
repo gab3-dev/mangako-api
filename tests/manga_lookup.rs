@@ -75,6 +75,20 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .await
         .unwrap();
     }
+    sqlx::query(
+        r#"
+        INSERT INTO manga_volumes (
+            manga_id, mangadex_cover_id, file_name, source_url,
+            volume, volume_key, locale, is_special_edition
+        )
+        VALUES ($1, 'dddddddd-dddd-dddd-dddd-dddddddddddd', 'cover-4.jpg',
+                'https://example.com/cover-4.jpg', '4', '4', 'pt-br', false)
+        "#,
+    )
+    .bind(manga_id)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let app = mangako_api::api::router(pool.clone());
     let response = app
@@ -110,6 +124,7 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
     );
 
     let detail = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/mangas/{mangadex_id}"))
@@ -124,6 +139,59 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .unwrap();
     let manga: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
     assert_eq!(manga["latestVolumeNumber"], "3");
+
+    let portuguese_detail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/mangas/{mangadex_id}?locale=PT-BR"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(portuguese_detail.status(), axum::http::StatusCode::OK);
+    let portuguese_body = axum::body::to_bytes(portuguese_detail.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let portuguese_manga: serde_json::Value = serde_json::from_slice(&portuguese_body).unwrap();
+    assert_eq!(portuguese_manga["latestVolumeNumber"], "4");
+
+    let unavailable_locale_detail = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/mangas/{mangadex_id}?locale=en"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let unavailable_locale_body =
+        axum::body::to_bytes(unavailable_locale_detail.into_body(), usize::MAX)
+            .await
+            .unwrap();
+    let unavailable_locale_manga: serde_json::Value =
+        serde_json::from_slice(&unavailable_locale_body).unwrap();
+    assert!(unavailable_locale_manga["latestVolumeNumber"].is_null());
+
+    let portuguese_volumes = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/mangas/{mangadex_id}/volumes?locale=pt-BR"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(portuguese_volumes.status(), axum::http::StatusCode::OK);
+    let portuguese_volumes_body = axum::body::to_bytes(portuguese_volumes.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let portuguese_volumes: serde_json::Value =
+        serde_json::from_slice(&portuguese_volumes_body).unwrap();
+    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 1);
+    assert_eq!(portuguese_volumes[0]["locale"], "pt-br");
 
     sqlx::query("DELETE FROM mangas WHERE mangadex_id = $1")
         .bind(mangadex_id)

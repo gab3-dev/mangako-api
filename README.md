@@ -79,12 +79,12 @@ The Docker base images and Rust dependencies support Linux ARM64. CI builds and 
 - `GET /docs`: Swagger UI.
 - `GET /api-docs/openapi.json`: OpenAPI JSON specification.
 - `GET /health`: returns `ok`.
-- `GET /mangas?title={title}&limit=10&offset=0`: requires API token. MangaDex defines search ordering and pagination; results are persisted locally. If MangaDex fails, the API returns a paginated local fallback. `/mangas/` with a trailing slash is also accepted.
+- `GET /mangas?title={title}&limit=10&offset=0&locale={locale}`: requires API token. MangaDex defines search ordering and pagination; results are persisted locally. If MangaDex fails, the API returns a paginated local fallback. `locale` calculates `latestVolumeNumber` from that cover language. `/mangas/` with a trailing slash is also accepted.
 - `GET /mangas?limit=10&offset=0`: requires API token. Returns MangaDex titles ordered by followed count. Successful pages are cached for 6 hours.
-- `GET /mangas/{id_or_slug}?refresh=false`: requires API token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt. Stale local data is served if MangaDex is unavailable.
-- `GET /mangas/{id_or_slug}/volumes?limit=50&offset=0&refresh=false`: requires API token. Returns a stable page of volume covers. Missing or stale volume data is synchronized from MangaDex. `refresh=true` forces a complete refresh and reconciles removed covers.
+- `GET /mangas/{id_or_slug}?refresh=false&locale={locale}`: requires API token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt. Stale local data is served if MangaDex is unavailable. `locale` calculates `latestVolumeNumber` only from that cover language.
+- `GET /mangas/{id_or_slug}/volumes?limit=50&offset=0&refresh=false&locale={locale}`: requires API token. Returns a stable page of volume covers, optionally filtered to `locale`. Missing or stale volume data is synchronized from MangaDex. `refresh=true` forces a complete refresh and reconciles removed covers.
 
-`MangaResponse.latestVolumeNumber` contains the highest synchronized numeric Japanese volume. Before cover synchronization, it uses MangaDex `lastVolume` or performs a lightweight `limit=1` lookup for the highest Japanese cover volume when that field is absent.
+`MangaResponse.latestVolumeNumber` contains the highest synchronized numeric volume for `locale` when supplied. Without `locale`, it preserves the Japanese default and falls back to MangaDex `lastVolume` before cover synchronization.
 
 ## Initial Manga Catalog Model
 
