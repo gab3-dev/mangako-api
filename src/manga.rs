@@ -453,8 +453,7 @@ fn normalize_locale(locale: Option<&str>) -> Option<String> {
     locale
         .map(str::trim)
         .filter(|locale| !locale.is_empty())
-        .map(normalize_language)
-        .flatten()
+        .and_then(normalize_language)
 }
 
 pub(crate) fn requested_language(
