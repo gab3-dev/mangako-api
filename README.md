@@ -72,7 +72,7 @@ Every response receives an `X-Request-Id`, and request logs include request ID, 
 
 ## ARM64
 
-The Docker base images and Rust dependencies support Linux ARM64. CI builds and publishes a single `linux/amd64,linux/arm64` image and runs an ARM64 smoke test. See `docs/arm64-deployment.md` for GHCR deployment, cache sizing, and PostgreSQL migration instructions.
+CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64-deployment.md` for GHCR deployment, cache sizing, and PostgreSQL migration instructions.
 
 ## Endpoints
 

@@ -1,8 +1,8 @@
-# Deploy em servidor ARM64
+# Deploy em servidor AMD64
 
-A API, PostgreSQL e todas as imagens base usadas pelo projeto suportam `linux/arm64`. O workflow `.github/workflows/ci.yml` testa o stack em runner ARM64 e, após os testes, chama `.github/workflows/docker.yml` para publicar uma imagem multi-arquitetura no GitHub Container Registry. O workflow de imagem também pode ser executado manualmente pelo GitHub Actions.
+A API, PostgreSQL e as imagens base usadas pelo projeto suportam `linux/arm64`, mas o workflow `.github/workflows/docker.yml` publica somente `linux/amd64`. O workflow `.github/workflows/ci.yml` mantém um smoke test ARM64; para produzir uma imagem ARM64, restaure essa plataforma no workflow de imagem.
 
-## Imagem multi-arquitetura
+## Imagem publicada
 
 Pushes para `master` ou `main` publicam:
 
@@ -12,7 +12,7 @@ ghcr.io/OWNER/REPOSITORY:master
 ghcr.io/OWNER/REPOSITORY:sha-COMMIT
 ```
 
-Tags Git `v*` também geram uma tag correspondente. O mesmo nome aponta para manifests `linux/amd64` e `linux/arm64`.
+Tags Git `v*` também geram uma tag correspondente. As tags apontam para uma imagem `linux/amd64`.
 
 Confirme os manifests publicados:
 
@@ -22,9 +22,9 @@ docker buildx imagetools inspect ghcr.io/OWNER/REPOSITORY:latest
 
 O pacote GHCR precisa estar público ou o servidor deve executar `docker login ghcr.io` antes do pull.
 
-## Execução no servidor ARM64
+## Execução no servidor AMD64
 
-Crie o arquivo de ambiente de produção a partir de `.env.production.example` e substitua `POSTGRES_PASSWORD` e `API_TOKEN` por valores aleatórios. Por padrão, o Compose usa a imagem multi-arquitetura publicada pelo workflow:
+Crie o arquivo de ambiente de produção a partir de `.env.production.example` e substitua `POSTGRES_PASSWORD` e `API_TOKEN` por valores aleatórios. Por padrão, o Compose usa a imagem publicada pelo workflow:
 
 ```sh
 MANGAKO_API_IMAGE='ghcr.io/gab3-dev/mangako-api:latest'
@@ -58,7 +58,7 @@ docker image inspect "$MANGAKO_API_IMAGE" --format '{{.Architecture}}/{{.Os}}'
 curl --fail https://mangako-api.kostudio.io/health
 ```
 
-O resultado esperado no servidor é `arm64/linux` e `ok`.
+O resultado esperado no servidor é `amd64/linux` e `ok`.
 
 ## Build nativo alternativo
 
@@ -125,7 +125,7 @@ Valide migrations e endpoints antes de remover o servidor antigo.
 
 O suporte inicial oficial é para:
 
-- `linux/amd64`
-- `linux/arm64`
+- `linux/amd64` pela imagem publicada
+- `linux/arm64` apenas por build nativo enquanto a publicação multi-arquitetura estiver desativada
 
 ARM 32-bit não faz parte do workflow de teste ou da imagem publicada.
