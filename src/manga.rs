@@ -127,7 +127,7 @@ pub struct SearchMangasQuery {
     pub limit: Option<u32>,
     /// Result offset. Defaults to 0 and is limited to 10000.
     pub offset: Option<u32>,
-    /// Preferred volume-cover locale used to calculate `latestVolumeNumber`.
+    /// Preferred cover language used to calculate `latestVolumeNumber`. Use `original` for the manga's original language.
     pub locale: Option<String>,
 }
 
@@ -135,7 +135,7 @@ pub struct SearchMangasQuery {
 pub struct MangaDetailQuery {
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
-    /// Preferred volume-cover locale used to calculate `latestVolumeNumber`.
+    /// Preferred cover language used to calculate `latestVolumeNumber`. Use `original` for the manga's original language.
     pub locale: Option<String>,
 }
 
@@ -147,7 +147,7 @@ pub struct MangaVolumesQuery {
     pub offset: Option<u32>,
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
-    /// Returns volume covers only for this locale.
+    /// Returns regular volume covers for this language plus every special edition. Use `original` for the manga's original language.
     pub locale: Option<String>,
 }
 
@@ -270,7 +270,8 @@ pub async fn load_manga_response(
             pool,
             manga.id,
             manga.mangadex_last_volume.as_deref(),
-            locale
+            locale,
+            manga.original_language.as_deref(),
         ),
     )?;
 
@@ -404,34 +405,78 @@ async fn latest_volume_number(
     manga_id: Uuid,
     mangadex_last_volume: Option<&str>,
     locale: Option<&str>,
+    original_language: Option<&str>,
 ) -> Result<Option<String>, sqlx::Error> {
-    let synced: Option<String> = sqlx::query_scalar(
+    let preferred_language =
+        requested_language(locale, original_language).unwrap_or_else(|| "ja".to_string());
+    let synced = latest_synced_volume_number(pool, manga_id, &preferred_language).await?;
+    let fallback = match original_language
+        .and_then(normalize_language)
+        .filter(|language| language != &preferred_language)
+    {
+        Some(language) => latest_synced_volume_number(pool, manga_id, &language).await?,
+        None => None,
+    };
+
+    if locale.is_some() {
+        Ok(synced.or(fallback))
+    } else {
+        Ok(synced
+            .or(fallback)
+            .or_else(|| mangadex_last_volume.map(ToOwned::to_owned)))
+    }
+}
+
+async fn latest_synced_volume_number(
+    pool: &PgPool,
+    manga_id: Uuid,
+    language: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
         r#"
         SELECT max(volume_key::numeric)::text
         FROM manga_volumes
         WHERE manga_id = $1
           AND deleted_at IS NULL
-          AND lower(locale) = COALESCE($2, 'ja')
+          AND is_special_edition = false
+          AND split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
           AND volume_key ~ '^[0-9]+([.][0-9]+)?$'
         "#,
     )
     .bind(manga_id)
-    .bind(locale)
+    .bind(language)
     .fetch_one(pool)
-    .await?;
-
-    if locale.is_some() {
-        Ok(synced)
-    } else {
-        Ok(synced.or_else(|| mangadex_last_volume.map(ToOwned::to_owned)))
-    }
+    .await
 }
 
 fn normalize_locale(locale: Option<&str>) -> Option<String> {
     locale
         .map(str::trim)
         .filter(|locale| !locale.is_empty())
-        .map(str::to_ascii_lowercase)
+        .map(normalize_language)
+        .flatten()
+}
+
+pub(crate) fn requested_language(
+    locale: Option<&str>,
+    original_language: Option<&str>,
+) -> Option<String> {
+    match locale {
+        Some("original") => original_language.and_then(normalize_language),
+        Some(language) => normalize_language(language),
+        None => None,
+    }
+}
+
+fn normalize_language(locale: &str) -> Option<String> {
+    let language = locale.trim().to_ascii_lowercase().replace('_', "-");
+    if language.is_empty() {
+        None
+    } else if language == "original" {
+        Some(language)
+    } else {
+        Some(language.split('-').next().unwrap_or_default().to_string())
+    }
 }
 
 fn pagination(
@@ -452,4 +497,22 @@ fn pagination(
         });
     }
     Ok((limit, offset))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_locale, requested_language};
+
+    #[test]
+    fn locale_queries_match_a_base_language() {
+        assert_eq!(normalize_locale(Some("PT-BR")).as_deref(), Some("pt"));
+    }
+
+    #[test]
+    fn original_locale_uses_the_manga_original_language() {
+        assert_eq!(
+            requested_language(Some("original"), Some("ko")),
+            Some("ko".to_string())
+        );
+    }
 }

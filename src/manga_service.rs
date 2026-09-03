@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    manga::{MangaResponse, MangaVolumeResponse, load_manga_response},
+    manga::{MangaResponse, MangaVolumeResponse, load_manga_response, requested_language},
     mangadex::{MangaDexApi, MangaDexClient, MangaDexCover, MangaDexManga, cover_url},
 };
 
@@ -35,11 +35,7 @@ where
                 .last_synced_at
                 .is_none_or(|synced| synced < Utc::now() - Duration::days(1));
             if !refresh && !stale {
-                return if locale.is_some() {
-                    Ok(local)
-                } else {
-                    self.populate_local_latest_volume(local).await
-                };
+                return self.populate_latest_volume(local, locale).await;
             }
 
             let Some(mangadex_id) = local.mangadex_id else {
@@ -51,9 +47,10 @@ where
                         self.populate_remote_latest_volume(&mut remote).await;
                     }
                     self.upsert_mangadex_manga(&remote).await?;
-                    return load_manga_response(&self.pool, &remote.id.to_string(), locale)
+                    let response = load_manga_response(&self.pool, &remote.id.to_string(), locale)
                         .await?
-                        .ok_or(ApiError::MangaNotFound);
+                        .ok_or(ApiError::MangaNotFound)?;
+                    return self.populate_latest_volume(response, locale).await;
                 }
                 Ok(None) => return Ok(local),
                 Err(error) => {
@@ -75,9 +72,10 @@ where
         }
         self.upsert_mangadex_manga(&remote).await?;
 
-        load_manga_response(&self.pool, &remote.id.to_string(), locale)
+        let response = load_manga_response(&self.pool, &remote.id.to_string(), locale)
             .await?
-            .ok_or(ApiError::MangaNotFound)
+            .ok_or(ApiError::MangaNotFound)?;
+        self.populate_latest_volume(response, locale).await
     }
 
     pub async fn search_mangas(
@@ -106,7 +104,7 @@ where
             if let Some(manga) =
                 load_manga_response(&self.pool, &remote.id.to_string(), locale).await?
             {
-                results.push(manga);
+                results.push(self.populate_latest_volume(manga, locale).await?);
             }
         }
 
@@ -126,9 +124,16 @@ where
         let volumes_stale = volumes_are_stale(&self.pool, manga.id).await?;
 
         let Some(mangadex_id) = manga.mangadex_id else {
-            return list_volumes(&self.pool, manga.id, limit, offset, locale)
-                .await
-                .map_err(ApiError::from);
+            return list_volumes(
+                &self.pool,
+                manga.id,
+                limit,
+                offset,
+                locale,
+                manga.original_language.as_deref(),
+            )
+            .await
+            .map_err(ApiError::from);
         };
 
         if (refresh || !has_local_volumes || volumes_stale)
@@ -140,24 +145,53 @@ where
             tracing::warn!(%error, %mangadex_id, "serving stale local manga volumes");
         }
 
-        list_volumes(&self.pool, manga.id, limit, offset, locale)
-            .await
-            .map_err(ApiError::from)
+        list_volumes(
+            &self.pool,
+            manga.id,
+            limit,
+            offset,
+            locale,
+            manga.original_language.as_deref(),
+        )
+        .await
+        .map_err(ApiError::from)
     }
 
-    async fn populate_local_latest_volume(
+    async fn populate_latest_volume(
         &self,
-        local: MangaResponse,
+        mut manga: MangaResponse,
+        locale: Option<&str>,
     ) -> Result<MangaResponse, ApiError> {
-        if local.latest_volume_number.is_some() {
-            return Ok(local);
+        if manga.latest_volume_number.is_some() {
+            return Ok(manga);
         }
-        let Some(mangadex_id) = local.mangadex_id else {
-            return Ok(local);
+        let Some(mangadex_id) = manga.mangadex_id else {
+            return Ok(manga);
         };
-        let Some(latest_volume) = self.fetch_latest_volume_number(mangadex_id).await else {
-            return Ok(local);
+        let preferred_language = requested_language(locale, manga.original_language.as_deref())
+            .unwrap_or_else(|| "ja".to_string());
+        let mut latest_volume = self
+            .fetch_latest_volume_number(mangadex_id, &preferred_language)
+            .await;
+        if latest_volume.is_none()
+            && let Some(original_language) = manga
+                .original_language
+                .as_deref()
+                .and_then(|language| requested_language(Some(language), None))
+                .filter(|language| language != &preferred_language)
+        {
+            latest_volume = self
+                .fetch_latest_volume_number(mangadex_id, &original_language)
+                .await;
+        }
+        let Some(latest_volume) = latest_volume else {
+            return Ok(manga);
         };
+
+        if locale.is_some() {
+            manga.latest_volume_number = Some(latest_volume);
+            return Ok(manga);
+        }
 
         sqlx::query(
             r#"
@@ -166,12 +200,12 @@ where
             WHERE id = $1 AND mangadex_last_volume IS NULL
             "#,
         )
-        .bind(local.id)
+        .bind(manga.id)
         .bind(latest_volume)
         .execute(&self.pool)
         .await?;
 
-        load_manga_response(&self.pool, &local.id.to_string(), None)
+        load_manga_response(&self.pool, &manga.id.to_string(), None)
             .await?
             .ok_or(ApiError::MangaNotFound)
     }
@@ -186,11 +220,19 @@ where
             return;
         }
 
-        manga.attributes.last_volume = self.fetch_latest_volume_number(manga.id).await;
+        manga.attributes.last_volume = self.fetch_latest_volume_number(manga.id, "ja").await;
     }
 
-    async fn fetch_latest_volume_number(&self, mangadex_id: Uuid) -> Option<String> {
-        match self.mangadex.latest_volume_number(mangadex_id).await {
+    async fn fetch_latest_volume_number(
+        &self,
+        mangadex_id: Uuid,
+        language: &str,
+    ) -> Option<String> {
+        match self
+            .mangadex
+            .latest_volume_number(mangadex_id, language)
+            .await
+        {
             Ok(volume) => volume.as_deref().and_then(normalized_volume_key),
             Err(error) => {
                 tracing::warn!(%error, %mangadex_id, "MangaDex latest volume lookup failed");
@@ -382,7 +424,11 @@ async fn list_volumes(
     limit: u32,
     offset: u32,
     locale: Option<&str>,
+    original_language: Option<&str>,
 ) -> Result<Vec<MangaVolumeResponse>, sqlx::Error> {
+    let preferred_language = requested_language(locale, original_language);
+    let original_language =
+        original_language.and_then(|language| requested_language(Some(language), None));
     sqlx::query_as::<_, MangaVolumeResponse>(
         r#"
         SELECT id, mangadex_cover_id, file_name, source_url, volume, volume_key,
@@ -390,17 +436,34 @@ async fn list_volumes(
         FROM manga_volumes
         WHERE manga_id = $1
           AND deleted_at IS NULL
-          AND ($2::text IS NULL OR lower(locale) = $2)
+          AND (
+              $2::text IS NULL
+              OR is_special_edition
+              OR split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
+              OR (
+                  NOT EXISTS (
+                      SELECT 1
+                      FROM manga_volumes preferred
+                      WHERE preferred.manga_id = manga_volumes.manga_id
+                        AND preferred.deleted_at IS NULL
+                        AND preferred.is_special_edition = false
+                        AND split_part(replace(lower(preferred.locale), '_', '-'), '-', 1) = $2
+                  )
+                  AND $3::text IS NOT NULL
+                  AND split_part(replace(lower(locale), '_', '-'), '-', 1) = $3
+              )
+          )
         ORDER BY
             CASE WHEN volume_key ~ '^[0-9]+([.][0-9]+)?$' THEN volume_key::numeric END ASC NULLS LAST,
             locale ASC,
             source_updated_at DESC NULLS LAST,
             id
-        LIMIT $3 OFFSET $4
+        LIMIT $4 OFFSET $5
         "#,
     )
     .bind(manga_id)
-    .bind(locale)
+    .bind(preferred_language)
+    .bind(original_language)
     .bind(i64::from(limit))
     .bind(i64::from(offset))
     .fetch_all(pool)
@@ -445,7 +508,8 @@ async fn upsert_volume(
         .volume
         .as_deref()
         .and_then(normalized_volume_key);
-    let is_special_edition = locale != "ja" || is_fractional_volume_key(volume_key.as_deref());
+    let is_special_edition =
+        volume_key.is_none() || is_fractional_volume_key(volume_key.as_deref());
     let source_url = cover_url(mangadex_id, file_name);
 
     if let Some(volume_key) = &volume_key {

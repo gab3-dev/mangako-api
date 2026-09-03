@@ -28,6 +28,7 @@ pub trait MangaDexApi: Clone + Send + Sync + 'static {
     fn latest_volume_number(
         &self,
         manga_id: Uuid,
+        language: &str,
     ) -> impl Future<Output = Result<Option<String>, reqwest::Error>> + Send;
 }
 
@@ -119,7 +120,11 @@ impl MangaDexApi for MangaDexClient {
             .data)
     }
 
-    async fn latest_volume_number(&self, manga_id: Uuid) -> Result<Option<String>, reqwest::Error> {
+    async fn latest_volume_number(
+        &self,
+        manga_id: Uuid,
+        language: &str,
+    ) -> Result<Option<String>, reqwest::Error> {
         let response = self
             .http
             .get(format!("{}/cover", self.base_url))
@@ -133,8 +138,12 @@ impl MangaDexApi for MangaDexClient {
             .await?
             .data
             .into_iter()
-            .next()
-            .and_then(|cover| cover.attributes.volume))
+            .find_map(|cover| {
+                let volume = cover.attributes.volume?;
+                (matches_language(cover.attributes.locale.as_deref(), language)
+                    && is_regular_volume(&volume))
+                .then_some(volume)
+            }))
     }
 }
 
@@ -249,11 +258,23 @@ fn manga_search_query(title: Option<&str>, offset: u32, limit: u32) -> Vec<(&str
 
 fn latest_volume_query(manga_id: Uuid) -> Vec<(&'static str, String)> {
     vec![
-        ("limit", "1".to_string()),
+        ("limit", "100".to_string()),
         ("manga[]", manga_id.to_string()),
-        ("locales[]", "ja".to_string()),
         ("order[volume]", "desc".to_string()),
     ]
+}
+
+fn matches_language(locale: Option<&str>, language: &str) -> bool {
+    locale
+        .map(|locale| locale.replace('_', "-").to_ascii_lowercase())
+        .and_then(|locale| locale.split('-').next().map(str::to_string))
+        .is_some_and(|locale| locale == language)
+}
+
+fn is_regular_volume(volume: &str) -> bool {
+    volume
+        .parse::<f64>()
+        .is_ok_and(|number| number.is_finite() && number.fract() == 0.0)
 }
 
 #[cfg(test)]
@@ -279,13 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn latest_volume_query_requests_highest_japanese_volume_only() {
+    fn latest_volume_query_requests_highest_volume_without_locale_filtering() {
         let manga_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         let query = latest_volume_query(manga_id);
 
-        assert!(query.contains(&("limit", "1".to_string())));
+        assert!(query.contains(&("limit", "100".to_string())));
         assert!(query.contains(&("manga[]", manga_id.to_string())));
-        assert!(query.contains(&("locales[]", "ja".to_string())));
+        assert!(!query.iter().any(|(key, _)| *key == "locales[]"));
         assert!(query.contains(&("order[volume]", "desc".to_string())));
     }
 }

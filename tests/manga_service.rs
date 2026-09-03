@@ -56,15 +56,23 @@ impl MangaDexApi for FakeMangaDex {
         }
     }
 
-    async fn latest_volume_number(&self, manga_id: Uuid) -> Result<Option<String>, reqwest::Error> {
+    async fn latest_volume_number(
+        &self,
+        manga_id: Uuid,
+        language: &str,
+    ) -> Result<Option<String>, reqwest::Error> {
         self.calls
             .lock()
             .unwrap()
-            .push(format!("latest_volume_number:{manga_id}"));
+            .push(format!("latest_volume_number:{manga_id}:{language}"));
         Ok(self
             .covers
             .iter()
-            .find(|cover| cover.attributes.locale.as_deref() == Some("ja"))
+            .find(|cover| {
+                cover.attributes.locale.as_deref().is_some_and(|locale| {
+                    locale.replace('_', "-").split('-').next() == Some(language)
+                })
+            })
             .and_then(|cover| cover.attributes.volume.clone()))
     }
 }
@@ -206,7 +214,7 @@ async fn search_fetches_latest_volume_without_synchronizing_all_covers() {
         fake.calls.lock().unwrap().as_slice(),
         [
             "search_mangas:Some(\"Missing Last Volume\"):0:10",
-            "latest_volume_number:66666666-6666-6666-6666-666666666666",
+            "latest_volume_number:66666666-6666-6666-6666-666666666666:ja",
         ]
     );
     let persisted_volumes: i64 = sqlx::query_scalar(
@@ -266,7 +274,7 @@ async fn fresh_local_manga_fetches_latest_volume_when_it_is_missing() {
     assert_eq!(manga.latest_volume_number.as_deref(), Some("9"));
     assert_eq!(
         fake.calls.lock().unwrap().as_slice(),
-        ["latest_volume_number:77777777-7777-7777-7777-777777777777"]
+        ["latest_volume_number:77777777-7777-7777-7777-777777777777:ja"]
     );
     cleanup_manga(&pool, mangadex_id).await;
 }

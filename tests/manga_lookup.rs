@@ -25,13 +25,27 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
 
     let manga_id: Uuid = sqlx::query_scalar(
         r#"
-        INSERT INTO mangas (mangadex_id, slug, primary_title, last_synced_at)
-        VALUES ($1, 'frieren-b0b721ff', 'Frieren', now())
+        INSERT INTO mangas (mangadex_id, slug, primary_title, original_language, last_synced_at)
+        VALUES ($1, 'frieren-b0b721ff', 'Frieren', 'ja', now())
         RETURNING id
         "#,
     )
     .bind(mangadex_id)
     .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO manga_volumes (
+            manga_id, mangadex_cover_id, file_name, source_url,
+            volume, volume_key, locale, is_special_edition
+        )
+        VALUES ($1, 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'cover-special.jpg',
+                'https://example.com/cover-special.jpg', '99.2', '99.2', 'en', true)
+        "#,
+    )
+    .bind(manga_id)
+    .execute(&pool)
     .await
     .unwrap();
 
@@ -144,7 +158,7 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/mangas/{mangadex_id}?locale=PT-BR"))
+                .uri(format!("/mangas/{mangadex_id}?locale=pt"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -173,12 +187,12 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
             .unwrap();
     let unavailable_locale_manga: serde_json::Value =
         serde_json::from_slice(&unavailable_locale_body).unwrap();
-    assert!(unavailable_locale_manga["latestVolumeNumber"].is_null());
+    assert_eq!(unavailable_locale_manga["latestVolumeNumber"], "3");
 
     let portuguese_volumes = app
         .oneshot(
             Request::builder()
-                .uri(format!("/mangas/{mangadex_id}/volumes?locale=pt-BR"))
+                .uri(format!("/mangas/{mangadex_id}/volumes?locale=pt"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -190,8 +204,21 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .unwrap();
     let portuguese_volumes: serde_json::Value =
         serde_json::from_slice(&portuguese_volumes_body).unwrap();
-    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 1);
-    assert_eq!(portuguese_volumes[0]["locale"], "pt-br");
+    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 2);
+    assert!(
+        portuguese_volumes
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|volume| volume["locale"] == "pt-br")
+    );
+    assert!(
+        portuguese_volumes
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|volume| volume["isSpecialEdition"] == true)
+    );
 
     sqlx::query("DELETE FROM mangas WHERE mangadex_id = $1")
         .bind(mangadex_id)
