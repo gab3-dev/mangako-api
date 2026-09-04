@@ -63,8 +63,11 @@ RUST_LOG=mangako_api=info,tower_http=info
 - `CACHE_TTL_SECONDS=0` disables response caching.
 - Searches without a title use a response-specific cache TTL of 6 hours.
 - Requests with `refresh=true` bypass and invalidate cached pages for that endpoint.
+- `GET /stats/mangadex-fallback` requires an API token and reports `catalogRequests`, `fallbackRequests`, and `fallbackRate` since the API process started. A request counts as a fallback at most once, including when serving stale local manga or volumes after MangaDex fails.
 
 Cache state is local to each API process. A multi-instance deployment should move caching to a reverse proxy, CDN, API gateway, or shared Redis-backed implementation.
+
+Fallback statistics are also process-local and reset when the API restarts. Poll and retain this endpoint externally when longer historical analysis is required.
 
 Rate limiting is intentionally not implemented inside the API. If it becomes necessary, configure it at the reverse proxy, CDN, or API gateway layer.
 
@@ -79,10 +82,11 @@ CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64
 - `GET /docs`: Swagger UI.
 - `GET /api-docs/openapi.json`: OpenAPI JSON specification.
 - `GET /health`: returns `ok`.
+- `GET /stats/mangadex-fallback`: requires API token. Returns MangaDex fallback statistics since process start.
 - `GET /mangas?title={title}&limit=10&offset=0&locale={locale}`: requires API token. MangaDex defines search ordering and pagination; results are persisted locally. If MangaDex fails, the API returns a paginated local fallback. `locale` calculates `latestVolumeNumber` from that cover language; regional values are matched by base language (`pt` matches `pt-br`) and `original` selects the manga's original language. `/mangas/` with a trailing slash is also accepted.
 - `GET /mangas?limit=10&offset=0`: requires API token. Returns MangaDex titles ordered by followed count. Successful pages are cached for 6 hours.
 - `GET /mangas/{id_or_slug}?refresh=false&locale={locale}`: requires API token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt. Stale local data is served if MangaDex is unavailable. `locale` calculates `latestVolumeNumber` from that cover language, falling back to the original language when needed.
-- `GET /mangas/{id_or_slug}/volumes?limit=50&offset=0&refresh=false&locale={locale}`: requires API token. Returns a stable page of regular volume covers for `locale`, plus every special edition regardless of language. Missing or stale volume data is synchronized from MangaDex. `refresh=true` forces a complete refresh and reconciles removed covers.
+- `GET /mangas/{id_or_slug}/volumes?limit=50&offset=0&refresh=false&locale={locale}`: requires API token. Returns a stable page of covers for `locale`, including special editions only in that language. Without `locale`, it uses Japanese and falls back to the original language only when Japanese volumes are unavailable. Missing or stale volume data is synchronized from MangaDex. `refresh=true` forces a complete refresh and reconciles removed covers.
 
 `MangaResponse.latestVolumeNumber` contains the highest regular synchronized numeric volume for `locale` when supplied. Without `locale`, it preserves the Japanese default and falls back to the original language, then MangaDex `lastVolume`, before cover synchronization.
 

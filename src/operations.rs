@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -14,6 +17,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, Utc};
 use tower_http::{
     LatencyUnit,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -26,6 +30,86 @@ const X_CACHE: HeaderName = HeaderName::from_static("x-cache");
 #[derive(Clone, Default)]
 pub struct OperationalConfig {
     pub cache: Option<CacheConfig>,
+}
+
+#[derive(Clone)]
+pub struct FallbackMetrics {
+    started_at: DateTime<Utc>,
+    catalog_requests: Arc<AtomicU64>,
+    fallback_requests: Arc<AtomicU64>,
+}
+
+#[derive(Clone)]
+pub struct FallbackRequest {
+    metrics: FallbackMetrics,
+    used: Arc<AtomicBool>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FallbackStatsResponse {
+    pub started_at: DateTime<Utc>,
+    pub catalog_requests: u64,
+    pub fallback_requests: u64,
+    pub fallback_rate: f64,
+}
+
+impl FallbackMetrics {
+    pub fn new() -> Self {
+        Self {
+            started_at: Utc::now(),
+            catalog_requests: Arc::new(AtomicU64::new(0)),
+            fallback_requests: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn track_request(&self) -> FallbackRequest {
+        self.catalog_requests.fetch_add(1, Ordering::Relaxed);
+        FallbackRequest {
+            metrics: self.clone(),
+            used: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn snapshot(&self) -> FallbackStatsResponse {
+        let catalog_requests = self.catalog_requests.load(Ordering::Relaxed);
+        let fallback_requests = self.fallback_requests.load(Ordering::Relaxed);
+        FallbackStatsResponse {
+            started_at: self.started_at,
+            catalog_requests,
+            fallback_requests,
+            fallback_rate: if catalog_requests == 0 {
+                0.0
+            } else {
+                fallback_requests as f64 / catalog_requests as f64
+            },
+        }
+    }
+}
+
+impl Default for FallbackMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FallbackRequest {
+    pub fn record(&self) {
+        if !self.used.swap(true, Ordering::Relaxed) {
+            self.metrics
+                .fallback_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+pub async fn track_catalog_request(
+    State(metrics): State<FallbackMetrics>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    request.extensions_mut().insert(metrics.track_request());
+    next.run(request).await
 }
 
 #[derive(Clone)]
@@ -244,6 +328,19 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn fallback_requests_are_counted_once() {
+        let metrics = FallbackMetrics::new();
+        let request = metrics.track_request();
+        request.record();
+        request.record();
+
+        let stats = metrics.snapshot();
+        assert_eq!(stats.catalog_requests, 1);
+        assert_eq!(stats.fallback_requests, 1);
+        assert_eq!(stats.fallback_rate, 1.0);
+    }
 
     #[tokio::test]
     async fn successful_get_responses_are_cached() {

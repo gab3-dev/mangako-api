@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{Extension, State},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::{
     api::AppState,
     error::{ApiError, ErrorResponse},
-    operations::CacheTtl,
+    operations::{CacheTtl, FallbackRequest, FallbackStatsResponse},
 };
 
 const MAX_PAGE_SIZE: u32 = 100;
@@ -147,7 +147,7 @@ pub struct MangaVolumesQuery {
     pub offset: Option<u32>,
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
-    /// Returns regular volume covers for this language plus every special edition. Use `original` for the manga's original language.
+    /// Returns volume covers for this language. Without it, uses Japanese and falls back to the manga's original language only when Japanese volumes are unavailable. Use `original` for the manga's original language.
     pub locale: Option<String>,
 }
 
@@ -164,6 +164,7 @@ pub struct MangaVolumesQuery {
 )]
 pub async fn search_mangas(
     State(state): State<AppState>,
+    Extension(fallback): Extension<FallbackRequest>,
     axum::extract::Query(query): axum::extract::Query<SearchMangasQuery>,
 ) -> Result<Response, ApiError> {
     let (limit, offset) = pagination(query.limit, query.offset, 10)?;
@@ -175,7 +176,7 @@ pub async fn search_mangas(
     let locale = normalize_locale(query.locale.as_deref());
     let mangas = state
         .manga_service
-        .search_mangas(title, limit, offset, locale.as_deref())
+        .search_mangas_for_request(title, limit, offset, locale.as_deref(), &fallback)
         .await?;
     let mut response = Json(mangas).into_response();
     if title.is_none() {
@@ -202,16 +203,18 @@ pub async fn search_mangas(
 )]
 pub async fn get_manga(
     State(state): State<AppState>,
+    Extension(fallback): Extension<FallbackRequest>,
     axum::extract::Path(manga_ref): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MangaDetailQuery>,
 ) -> Result<Json<MangaResponse>, ApiError> {
     let locale = normalize_locale(query.locale.as_deref());
     state
         .manga_service
-        .get_manga(
+        .get_manga_for_request(
             &manga_ref,
             query.refresh.unwrap_or(false),
             locale.as_deref(),
+            &fallback,
         )
         .await
         .map(Json)
@@ -233,6 +236,7 @@ pub async fn get_manga(
 )]
 pub async fn get_manga_volumes(
     State(state): State<AppState>,
+    Extension(fallback): Extension<FallbackRequest>,
     axum::extract::Path(manga_ref): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MangaVolumesQuery>,
 ) -> Result<Json<Vec<MangaVolumeResponse>>, ApiError> {
@@ -240,15 +244,26 @@ pub async fn get_manga_volumes(
     let locale = normalize_locale(query.locale.as_deref());
     state
         .manga_service
-        .get_manga_volumes(
+        .get_manga_volumes_for_request(
             &manga_ref,
             limit,
             offset,
             query.refresh.unwrap_or(false),
             locale.as_deref(),
+            &fallback,
         )
         .await
         .map(Json)
+}
+
+#[utoipa::path(
+    get,
+    path = "/stats/mangadex-fallback",
+    security(("api_token" = [])),
+    responses((status = 200, description = "MangaDex fallback statistics since process start", body = FallbackStatsResponse))
+)]
+pub async fn mangadex_fallback_stats(State(state): State<AppState>) -> Json<FallbackStatsResponse> {
+    Json(state.fallback_metrics.snapshot())
 }
 
 pub async fn load_manga_response(

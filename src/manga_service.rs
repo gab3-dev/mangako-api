@@ -8,6 +8,7 @@ use crate::{
     error::ApiError,
     manga::{MangaResponse, MangaVolumeResponse, load_manga_response, requested_language},
     mangadex::{MangaDexApi, MangaDexClient, MangaDexCover, MangaDexManga, cover_url},
+    operations::FallbackRequest,
 };
 
 #[derive(Clone)]
@@ -29,6 +30,27 @@ where
         manga_ref: &str,
         refresh: bool,
         locale: Option<&str>,
+    ) -> Result<MangaResponse, ApiError> {
+        self.get_manga_inner(manga_ref, refresh, locale, None).await
+    }
+
+    pub async fn get_manga_for_request(
+        &self,
+        manga_ref: &str,
+        refresh: bool,
+        locale: Option<&str>,
+        fallback: &FallbackRequest,
+    ) -> Result<MangaResponse, ApiError> {
+        self.get_manga_inner(manga_ref, refresh, locale, Some(fallback))
+            .await
+    }
+
+    async fn get_manga_inner(
+        &self,
+        manga_ref: &str,
+        refresh: bool,
+        locale: Option<&str>,
+        fallback: Option<&FallbackRequest>,
     ) -> Result<MangaResponse, ApiError> {
         if let Some(local) = load_manga_response(&self.pool, manga_ref, locale).await? {
             let stale = local
@@ -52,9 +74,13 @@ where
                         .ok_or(ApiError::MangaNotFound)?;
                     return self.populate_latest_volume(response, locale).await;
                 }
-                Ok(None) => return Ok(local),
+                Ok(None) => {
+                    record_fallback(fallback);
+                    return Ok(local);
+                }
                 Err(error) => {
                     tracing::warn!(%error, %mangadex_id, "serving stale local manga");
+                    record_fallback(fallback);
                     return Ok(local);
                 }
             }
@@ -85,10 +111,35 @@ where
         offset: u32,
         locale: Option<&str>,
     ) -> Result<Vec<MangaResponse>, ApiError> {
+        self.search_mangas_inner(title, limit, offset, locale, None)
+            .await
+    }
+
+    pub async fn search_mangas_for_request(
+        &self,
+        title: Option<&str>,
+        limit: u32,
+        offset: u32,
+        locale: Option<&str>,
+        fallback: &FallbackRequest,
+    ) -> Result<Vec<MangaResponse>, ApiError> {
+        self.search_mangas_inner(title, limit, offset, locale, Some(fallback))
+            .await
+    }
+
+    async fn search_mangas_inner(
+        &self,
+        title: Option<&str>,
+        limit: u32,
+        offset: u32,
+        locale: Option<&str>,
+        fallback: Option<&FallbackRequest>,
+    ) -> Result<Vec<MangaResponse>, ApiError> {
         let remote_results = match self.mangadex.search_mangas(title, offset, limit).await {
             Ok(results) => results,
             Err(error) => {
                 tracing::warn!(%error, ?title, limit, offset, "MangaDex search failed; using local fallback");
+                record_fallback(fallback);
                 return search_local_mangas(&self.pool, title, limit, offset, locale)
                     .await
                     .map_err(ApiError::from);
@@ -119,7 +170,35 @@ where
         refresh: bool,
         locale: Option<&str>,
     ) -> Result<Vec<MangaVolumeResponse>, ApiError> {
-        let manga = self.get_manga(manga_ref, refresh, locale).await?;
+        self.get_manga_volumes_inner(manga_ref, limit, offset, refresh, locale, None)
+            .await
+    }
+
+    pub async fn get_manga_volumes_for_request(
+        &self,
+        manga_ref: &str,
+        limit: u32,
+        offset: u32,
+        refresh: bool,
+        locale: Option<&str>,
+        fallback: &FallbackRequest,
+    ) -> Result<Vec<MangaVolumeResponse>, ApiError> {
+        self.get_manga_volumes_inner(manga_ref, limit, offset, refresh, locale, Some(fallback))
+            .await
+    }
+
+    async fn get_manga_volumes_inner(
+        &self,
+        manga_ref: &str,
+        limit: u32,
+        offset: u32,
+        refresh: bool,
+        locale: Option<&str>,
+        fallback: Option<&FallbackRequest>,
+    ) -> Result<Vec<MangaVolumeResponse>, ApiError> {
+        let manga = self
+            .get_manga_inner(manga_ref, refresh, locale, fallback)
+            .await?;
         let has_local_volumes = has_volumes(&self.pool, manga.id).await?;
         let volumes_stale = volumes_are_stale(&self.pool, manga.id).await?;
 
@@ -143,6 +222,7 @@ where
                 return Err(error);
             }
             tracing::warn!(%error, %mangadex_id, "serving stale local manga volumes");
+            record_fallback(fallback);
         }
 
         list_volumes(
@@ -354,6 +434,12 @@ where
     }
 }
 
+fn record_fallback(fallback: Option<&FallbackRequest>) {
+    if let Some(fallback) = fallback {
+        fallback.record();
+    }
+}
+
 async fn search_local_mangas(
     pool: &PgPool,
     title: Option<&str>,
@@ -426,9 +512,15 @@ async fn list_volumes(
     locale: Option<&str>,
     original_language: Option<&str>,
 ) -> Result<Vec<MangaVolumeResponse>, sqlx::Error> {
-    let preferred_language = requested_language(locale, original_language);
-    let original_language =
-        original_language.and_then(|language| requested_language(Some(language), None));
+    let preferred_language =
+        requested_language(locale, original_language).unwrap_or_else(|| "ja".to_string());
+    let fallback_language = if locale.is_none() {
+        original_language
+            .and_then(|language| requested_language(Some(language), None))
+            .filter(|language| language != &preferred_language)
+    } else {
+        None
+    };
     sqlx::query_as::<_, MangaVolumeResponse>(
         r#"
         SELECT id, mangadex_cover_id, file_name, source_url, volume, volume_key,
@@ -437,19 +529,16 @@ async fn list_volumes(
         WHERE manga_id = $1
           AND deleted_at IS NULL
           AND (
-              $2::text IS NULL
-              OR is_special_edition
-              OR split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
+              split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
               OR (
-                  NOT EXISTS (
+                  $3::text IS NOT NULL
+                  AND NOT EXISTS (
                       SELECT 1
                       FROM manga_volumes preferred
                       WHERE preferred.manga_id = manga_volumes.manga_id
                         AND preferred.deleted_at IS NULL
-                        AND preferred.is_special_edition = false
                         AND split_part(replace(lower(preferred.locale), '_', '-'), '-', 1) = $2
                   )
-                  AND $3::text IS NOT NULL
                   AND split_part(replace(lower(locale), '_', '-'), '-', 1) = $3
               )
           )
@@ -463,7 +552,7 @@ async fn list_volumes(
     )
     .bind(manga_id)
     .bind(preferred_language)
-    .bind(original_language)
+    .bind(fallback_language)
     .bind(i64::from(limit))
     .bind(i64::from(offset))
     .fetch_all(pool)

@@ -7,6 +7,7 @@ use crate::{
         MangaAliasResponse, MangaCoverResponse, MangaCreatorResponse, MangaLocalizationResponse,
         MangaResponse, MangaVolumeResponse,
     },
+    operations::FallbackStatsResponse,
 };
 
 #[derive(OpenApi)]
@@ -19,7 +20,8 @@ use crate::{
     paths(
         crate::manga::search_mangas,
         crate::manga::get_manga,
-        crate::manga::get_manga_volumes
+        crate::manga::get_manga_volumes,
+        crate::manga::mangadex_fallback_stats
     ),
     components(
         schemas(
@@ -29,7 +31,8 @@ use crate::{
             MangaCreatorResponse,
             MangaLocalizationResponse,
             MangaResponse,
-            MangaVolumeResponse
+            MangaVolumeResponse,
+            FallbackStatsResponse
         )
     ),
     modifiers(&SecurityAddon),

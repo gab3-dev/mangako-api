@@ -137,6 +137,29 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
             .starts_with("https://")
     );
 
+    let default_volumes = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/mangas/{mangadex_id}/volumes?limit=10"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(default_volumes.status(), axum::http::StatusCode::OK);
+    let default_volumes_body = axum::body::to_bytes(default_volumes.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let default_volumes: serde_json::Value = serde_json::from_slice(&default_volumes_body).unwrap();
+    let default_volumes = default_volumes.as_array().unwrap();
+    assert_eq!(default_volumes.len(), 3);
+    assert!(
+        default_volumes
+            .iter()
+            .all(|volume| volume["locale"] == "ja")
+    );
+
     let detail = app
         .clone()
         .oneshot(
@@ -204,20 +227,13 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .unwrap();
     let portuguese_volumes: serde_json::Value =
         serde_json::from_slice(&portuguese_volumes_body).unwrap();
-    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 2);
+    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 1);
     assert!(
         portuguese_volumes
             .as_array()
             .unwrap()
             .iter()
-            .any(|volume| volume["locale"] == "pt-br")
-    );
-    assert!(
-        portuguese_volumes
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|volume| volume["isSpecialEdition"] == true)
+            .all(|volume| volume["locale"] == "pt-br")
     );
 
     sqlx::query("DELETE FROM mangas WHERE mangadex_id = $1")

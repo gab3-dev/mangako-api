@@ -9,12 +9,13 @@ use crate::{
     manga_service::MangaService,
     mangadex::MangaDexClient,
     openapi::ApiDoc,
-    operations::{OperationalConfig, ResponseCache},
+    operations::{FallbackMetrics, OperationalConfig, ResponseCache},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub manga_service: MangaService,
+    pub fallback_metrics: FallbackMetrics,
 }
 
 pub fn router(pool: PgPool) -> Router {
@@ -42,6 +43,7 @@ fn build_router(pool: PgPool, api_token: Option<String>, operations: Operational
         .expect("valid reqwest client");
     let mangadex = MangaDexClient::new(http);
     let manga_service = MangaService::new(pool, mangadex);
+    let fallback_metrics = FallbackMetrics::new();
 
     let mut catalog = Router::new()
         .route("/mangas", get(manga::search_mangas))
@@ -56,8 +58,21 @@ fn build_router(pool: PgPool, api_token: Option<String>, operations: Operational
         ));
     }
 
+    catalog = catalog.layer(middleware::from_fn_with_state(
+        fallback_metrics.clone(),
+        crate::operations::track_catalog_request,
+    ));
+
+    let mut stats = Router::new().route(
+        "/stats/mangadex-fallback",
+        get(manga::mangadex_fallback_stats),
+    );
     if let Some(api_token) = api_token {
         catalog = catalog.layer(middleware::from_fn_with_state(
+            api_token.clone(),
+            auth::require_api_token,
+        ));
+        stats = stats.layer(middleware::from_fn_with_state(
             api_token,
             auth::require_api_token,
         ));
@@ -67,7 +82,11 @@ fn build_router(pool: PgPool, api_token: Option<String>, operations: Operational
         .route("/health", get(health))
         .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .merge(catalog)
-        .with_state(AppState { manga_service })
+        .merge(stats)
+        .with_state(AppState {
+            manga_service,
+            fallback_metrics,
+        })
 }
 
 async fn health() -> &'static str {
