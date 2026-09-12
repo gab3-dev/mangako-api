@@ -4,6 +4,158 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn volumes_combine_global_specials_with_regular_language_before_pagination() {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://mangako:mangako@localhost:5432/mangako_api".to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .expect("PostgreSQL must be available for integration tests");
+    mangako_api::db::migrate(&pool).await.unwrap();
+
+    sqlx::query("DELETE FROM mangas WHERE slug = 'global-specials-test'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let manga_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO mangas (slug, primary_title, original_language, last_synced_at)
+         VALUES ('global-specials-test', 'Global specials', 'ko', now()) RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (name, volume, locale, special, deleted) in [
+        ("ja-normal", Some("2"), "ja", false, false),
+        ("pt-normal", Some("2"), "pt-br", false, false),
+        ("ko-normal", Some("2"), "ko", false, false),
+        ("en-normal", Some("2"), "en", false, false),
+        ("ja-special", Some("1.5"), "ja", true, false),
+        ("pt-special", Some("1.5"), "pt-br", true, false),
+        ("ko-special", Some("1.5"), "ko", true, false),
+        ("en-special", Some("1.5"), "en", true, false),
+        ("und-special-a", None, "und", true, false),
+        ("und-special-b", None, "und", true, false),
+        ("deleted-special", Some("0.5"), "ja", true, true),
+    ] {
+        sqlx::query(
+            "INSERT INTO manga_volumes
+             (manga_id, file_name, source_url, volume, volume_key, locale, is_special_edition, deleted_at)
+             VALUES ($1, $2, 'https://example.com/cover.jpg', $3, $3, $4, $5,
+                     CASE WHEN $6 THEN now() END)",
+        )
+        .bind(manga_id)
+        .bind(name)
+        .bind(volume)
+        .bind(locale)
+        .bind(special)
+        .bind(deleted)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let app = mangako_api::api::router(pool.clone());
+    for japanese_normals_deleted in [false, true] {
+        if japanese_normals_deleted {
+            sqlx::query(
+                "UPDATE manga_volumes SET deleted_at = now()
+                 WHERE manga_id = $1 AND locale = 'ja' AND is_special_edition = false",
+            )
+            .bind(manga_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (query, expected_normal) in [
+            ("", Some(if japanese_normals_deleted { "ko" } else { "ja" })),
+            (
+                "&locale=ja",
+                if japanese_normals_deleted {
+                    None
+                } else {
+                    Some("ja")
+                },
+            ),
+            ("&locale=pt", Some("pt-br")),
+            ("&locale=original", Some("ko")),
+            ("&locale=fr", None),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/mangas/{manga_id}/volumes?limit=100{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let volumes: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+            let normals: Vec<_> = volumes
+                .iter()
+                .filter(|volume| volume["isSpecialEdition"] == false)
+                .map(|volume| volume["locale"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                normals,
+                expected_normal.into_iter().collect::<Vec<_>>(),
+                "{query}"
+            );
+            let specials: Vec<_> = volumes
+                .iter()
+                .filter(|volume| volume["isSpecialEdition"] == true)
+                .map(|volume| volume["locale"].as_str().unwrap())
+                .collect();
+            assert_eq!(specials, ["en", "ja", "ko", "pt-br", "und", "und"]);
+            let ids: std::collections::HashSet<_> = volumes
+                .iter()
+                .map(|volume| volume["id"].as_str().unwrap())
+                .collect();
+            assert_eq!(ids.len(), volumes.len());
+            assert!(
+                volumes
+                    .iter()
+                    .all(|volume| volume["fileName"] != "deleted-special")
+            );
+
+            let mut paged = Vec::new();
+            for offset in (0..=volumes.len() + 1).step_by(2) {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!(
+                                "/mangas/{manga_id}/volumes?limit=2&offset={offset}{query}"
+                            ))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let page: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+                assert!(page.len() <= 2);
+                paged.extend(page);
+            }
+            assert_eq!(paged, volumes, "{query}");
+        }
+    }
+    sqlx::query("DELETE FROM mangas WHERE id = $1")
+        .bind(manga_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn volumes_can_be_loaded_by_mangadex_id() {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://mangako:mangako@localhost:5432/mangako_api".to_string());
@@ -153,11 +305,11 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .unwrap();
     let default_volumes: serde_json::Value = serde_json::from_slice(&default_volumes_body).unwrap();
     let default_volumes = default_volumes.as_array().unwrap();
-    assert_eq!(default_volumes.len(), 3);
+    assert_eq!(default_volumes.len(), 4);
     assert!(
         default_volumes
             .iter()
-            .all(|volume| volume["locale"] == "ja")
+            .all(|volume| volume["locale"] == "ja" || volume["isSpecialEdition"] == true)
     );
 
     let detail = app
@@ -227,13 +379,13 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .unwrap();
     let portuguese_volumes: serde_json::Value =
         serde_json::from_slice(&portuguese_volumes_body).unwrap();
-    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 1);
+    assert_eq!(portuguese_volumes.as_array().unwrap().len(), 2);
     assert!(
         portuguese_volumes
             .as_array()
             .unwrap()
             .iter()
-            .all(|volume| volume["locale"] == "pt-br")
+            .all(|volume| volume["locale"] == "pt-br" || volume["isSpecialEdition"] == true)
     );
 
     sqlx::query("DELETE FROM mangas WHERE mangadex_id = $1")

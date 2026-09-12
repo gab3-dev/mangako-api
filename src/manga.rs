@@ -147,7 +147,7 @@ pub struct MangaVolumesQuery {
     pub offset: Option<u32>,
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
-    /// Returns volume covers for this language. Without it, uses Japanese and falls back to the manga's original language only when Japanese volumes are unavailable. Use `original` for the manga's original language.
+    /// Selects the language of regular volumes, without fallback when explicit. Use `original` for the manga's original language. Without it, uses Japanese and falls back to the original language only when no active regular Japanese volumes exist. Active special editions in all languages are always included before pagination.
     pub locale: Option<String>,
 }
 

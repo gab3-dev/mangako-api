@@ -97,6 +97,8 @@ curl --fail-with-body --get \
 
 Rota protegida por API token. Usa o mesmo `MANGA_REF` definido acima:
 
+Sem `locale`, os volumes normais usam japones, com fallback para o idioma original somente se nao houver normais japoneses ativos. Especiais ativos de todos os idiomas entram na mesma ordenacao e paginacao; especiais japoneses nao bloqueiam o fallback. Use `--data-urlencode 'locale=pt'` para normais em portugues (incluindo `pt-br`), ou `locale=original` para o idioma original. Um locale explicito nao faz fallback dos normais. Capas removidas nao sao retornadas.
+
 ```sh
 curl --fail-with-body --get \
   --header "Authorization: Bearer $MANGAKO_API_TOKEN" \

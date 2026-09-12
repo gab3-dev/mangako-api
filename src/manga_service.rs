@@ -529,7 +529,8 @@ async fn list_volumes(
         WHERE manga_id = $1
           AND deleted_at IS NULL
           AND (
-              split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
+              is_special_edition = true
+              OR split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
               OR (
                   $3::text IS NOT NULL
                   AND NOT EXISTS (
@@ -537,6 +538,7 @@ async fn list_volumes(
                       FROM manga_volumes preferred
                       WHERE preferred.manga_id = manga_volumes.manga_id
                         AND preferred.deleted_at IS NULL
+                        AND preferred.is_special_edition = false
                         AND split_part(replace(lower(preferred.locale), '_', '-'), '-', 1) = $2
                   )
                   AND split_part(replace(lower(locale), '_', '-'), '-', 1) = $3
