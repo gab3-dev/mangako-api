@@ -14,6 +14,14 @@ ghcr.io/OWNER/REPOSITORY:sha-COMMIT
 
 Tags Git `v*` também geram uma tag correspondente. As tags apontam para uma imagem `linux/amd64`.
 
+## Deploy automático pela CI
+
+Depois de publicar a imagem no branch padrão do repositório, o workflow executa o deploy da API no servidor de produção. O job atualiza somente o serviço `api`; Caddy e PostgreSQL permanecem em execução.
+
+Crie o secret `DEPLOY_SSH_PRIVATE_KEY` no repositório GitHub com o conteúdo da chave privada que acessa o usuário `ubuntu` no servidor. Para a configuração local atual, essa é a chave indicada pelo alias SSH `mangako-api`.
+
+O workflow usa o host `147.15.69.58`, o usuário `ubuntu` e o diretório `/opt/mangako-api`. Ele bloqueia deploys concorrentes e só conclui com sucesso depois que o healthcheck do serviço `api` ficar saudável.
+
 Confirme os manifests publicados:
 
 ```sh
