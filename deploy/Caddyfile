@@ -1,6 +1,19 @@
 mangako-api.kostudio.io {
+	tls {
+		client_auth {
+			trust_pool file /data/authenticated-origin-pull-ca.pem
+		}
+	}
+
 	encode zstd gzip
-	reverse_proxy api:3000
+
+	@environment_files path_regexp environment_files (^|/)\.env(?:\..*)?$
+	respond @environment_files 404
+
+	reverse_proxy api:3000 {
+		header_up -X-Forwarded-For
+		header_up X-Forwarded-For {remote_host}
+	}
 
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
@@ -9,5 +22,4 @@ mangako-api.kostudio.io {
 		-Server
 	}
 
-	log
 }

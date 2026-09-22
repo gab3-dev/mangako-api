@@ -4,15 +4,13 @@ A API, PostgreSQL e as imagens base usadas pelo projeto suportam `linux/arm64`, 
 
 ## Imagem publicada
 
-Pushes para `master` ou `main` publicam:
+Pushes para `master` ou `main` publicam tags de conveniência e um digest imutável:
 
 ```text
-ghcr.io/OWNER/REPOSITORY:latest
-ghcr.io/OWNER/REPOSITORY:master
-ghcr.io/OWNER/REPOSITORY:sha-COMMIT
+ghcr.io/OWNER/REPOSITORY@sha256:MANIFEST_DIGEST
 ```
 
-Tags Git `v*` também geram uma tag correspondente. As tags apontam para uma imagem `linux/amd64`.
+Tags Git `v*` também geram uma tag correspondente. O deploy automático usa o digest do workflow, nunca uma tag mutável.
 
 ## Deploy automático pela CI
 
@@ -32,10 +30,10 @@ O pacote GHCR precisa estar público ou o servidor deve executar `docker login g
 
 ## Execução no servidor AMD64
 
-Crie o arquivo de ambiente de produção a partir de `.env.production.example` e substitua `POSTGRES_PASSWORD` e `API_TOKEN` por valores aleatórios. Por padrão, o Compose usa a imagem publicada pelo workflow:
+Crie o arquivo de ambiente de produção a partir de `.env.production.example` e substitua `POSTGRES_PASSWORD`, `API_READ_TOKEN` e `API_WRITE_TOKEN` por valores aleatórios diferentes. O token de escrita fica apenas no servidor. O CI substitui temporariamente `MANGAKO_API_IMAGE` pelo digest publicado durante cada deploy:
 
 ```sh
-MANGAKO_API_IMAGE='ghcr.io/gab3-dev/mangako-api:latest'
+MANGAKO_API_IMAGE='ghcr.io/gab3-dev/mangako-api@sha256:MANIFEST_DIGEST'
 ```
 
 Baixe as imagens e suba o stack sem recompilar no servidor:
@@ -73,7 +71,8 @@ O resultado esperado no servidor é `amd64/linux` e `ok`.
 Se não houver imagem publicada, um host ARM64 pode compilar diretamente:
 
 ```sh
-export API_TOKEN='replace-with-a-random-token'
+export API_READ_TOKEN='replace-with-a-random-read-token-at-least-32-characters'
+export API_WRITE_TOKEN='replace-with-a-different-random-write-token-32-chars'
 docker compose up -d --build --wait
 ```
 

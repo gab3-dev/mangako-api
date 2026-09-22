@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   quality:
@@ -31,14 +30,15 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgres://mangako:mangako@localhost:5432/mangako_api
-      API_TOKEN: ci-token
+      API_READ_TOKEN: ci-read-token-0123456789abcdef012345
+      API_WRITE_TOKEN: ci-write-token-0123456789abcdef01234
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.95.0
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
@@ -48,34 +48,40 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Build and start ARM64 stack
         env:
-          API_TOKEN: arm64-smoke-token
+          API_READ_TOKEN: arm64-smoke-read-token-0123456789
+          API_WRITE_TOKEN: arm64-smoke-write-token-012345678
         run: docker compose up -d --build --wait
       - name: Verify health, OpenAPI, and authenticated routing
         run: |
           curl --fail --silent --show-error http://localhost:3000/health
           curl --fail --silent --show-error http://localhost:3000/api-docs/openapi.json >/dev/null
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            --header 'Authorization: Bearer arm64-smoke-token' \
+            --header 'Authorization: Bearer arm64-smoke-read-token-0123456789' \
             'http://localhost:3000/mangas?limit=0')" = "400"
       - name: Show service logs
         if: always()
         env:
-          API_TOKEN: arm64-smoke-token
+          API_READ_TOKEN: arm64-smoke-read-token-0123456789
+          API_WRITE_TOKEN: arm64-smoke-write-token-012345678
         run: docker compose logs --no-color
       - name: Stop ARM64 stack
         if: always()
         env:
-          API_TOKEN: arm64-smoke-token
+          API_READ_TOKEN: arm64-smoke-read-token-0123456789
+          API_WRITE_TOKEN: arm64-smoke-write-token-012345678
         run: docker compose down --volumes
 
   image:
     name: Multi-architecture image
     needs: [quality, arm64-smoke]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/docker.yml
-    secrets: inherit
 
   deploy:
     name: Deploy production
@@ -84,23 +90,30 @@ jobs:
       github.event_name == 'push' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
+    environment: production
     concurrency:
       group: production-deploy
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Configure the production host key
         run: |
           install -d -m 700 ~/.ssh
           printf '%s\n' '147.15.69.58 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINLrNji9HsxQW2UuQvyrMNdJaxVZJGI/PejHuibMOE66' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
       - name: Load the deployment key
-        uses: webfactory/ssh-agent@v0.9.1
+        uses: webfactory/ssh-agent@a6f90b1f127823b31d4d4a8d96047790581349bd
         with:
           ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
       - name: Update the API
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
         run: |
-          ssh -o BatchMode=yes ubuntu@147.15.69.58 '
+          scp -o BatchMode=yes docker-compose.prod.yml ubuntu@147.15.69.58:/opt/mangako-api/docker-compose.prod.yml
+          scp -o BatchMode=yes deploy/Caddyfile ubuntu@147.15.69.58:/opt/mangako-api/deploy/Caddyfile
+          scp -o BatchMode=yes deploy/authenticated_origin_pull_ca.pem ubuntu@147.15.69.58:/opt/mangako-api/deploy/authenticated_origin_pull_ca.pem
+          ssh -o BatchMode=yes ubuntu@147.15.69.58 "
             cd /opt/mangako-api &&
-            docker compose --env-file .env.production -f docker-compose.prod.yml pull api &&
-            docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps --wait api
-          '
+            MANGAKO_API_IMAGE='$IMAGE' docker compose --env-file .env.production -f docker-compose.prod.yml pull api &&
+            MANGAKO_API_IMAGE='$IMAGE' docker compose --env-file .env.production -f docker-compose.prod.yml up -d --wait api caddy
+          "

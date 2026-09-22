@@ -1,4 +1,8 @@
-target/
-.git/
-.env
-.ai-jail
+**
+!Dockerfile
+!Cargo.toml
+!Cargo.lock
+!migrations/
+!migrations/**
+!src/
+!src/**

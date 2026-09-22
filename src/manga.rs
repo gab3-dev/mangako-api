@@ -3,6 +3,7 @@ use std::time::Duration;
 use axum::{
     Json,
     extract::{Extension, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
@@ -101,6 +102,67 @@ pub struct MangaVolumeResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMangaRequest {
+    pub slug: String,
+    pub primary_title: String,
+    pub original_language: Option<String>,
+    pub publication_demographic: Option<String>,
+    pub status: Option<String>,
+    pub year: Option<i32>,
+    pub content_rating: Option<String>,
+    #[serde(default)]
+    pub localizations: Vec<CreateMangaLocalizationRequest>,
+    #[serde(default)]
+    pub aliases: Vec<CreateMangaAliasRequest>,
+    #[serde(default)]
+    pub covers: Vec<CreateMangaCoverRequest>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMangaLocalizationRequest {
+    pub language: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_primary: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMangaAliasRequest {
+    pub language: String,
+    pub title: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMangaCoverRequest {
+    pub file_name: Option<String>,
+    pub source_url: Option<String>,
+    pub storage_key: Option<String>,
+    pub locale: Option<String>,
+    pub volume: Option<String>,
+    #[serde(default)]
+    pub is_primary: bool,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMangaVolumeRequest {
+    pub file_name: String,
+    pub source_url: String,
+    pub volume: Option<String>,
+    pub locale: Option<String>,
+}
+
 #[derive(FromRow)]
 struct MangaRow {
     id: Uuid,
@@ -120,6 +182,7 @@ struct MangaRow {
 }
 
 #[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct SearchMangasQuery {
     /// Manga title. When omitted or blank, returns MangaDex popular titles.
     pub title: Option<String>,
@@ -132,6 +195,7 @@ pub struct SearchMangasQuery {
 }
 
 #[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct MangaDetailQuery {
     /// Force a MangaDex refresh and bypass response cache.
     pub refresh: Option<bool>,
@@ -140,6 +204,7 @@ pub struct MangaDetailQuery {
 }
 
 #[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
 pub struct MangaVolumesQuery {
     /// Page size. Defaults to 50 and is limited to 100.
     pub limit: Option<u32>,
@@ -154,7 +219,7 @@ pub struct MangaVolumesQuery {
 #[utoipa::path(
     get,
     path = "/mangas",
-    security(("api_token" = [])),
+    security(("read_token" = [])),
     params(SearchMangasQuery),
     responses(
         (status = 200, description = "Manga search results", body = [MangaResponse]),
@@ -173,6 +238,12 @@ pub async fn search_mangas(
         .as_deref()
         .map(str::trim)
         .filter(|title| !title.is_empty());
+    if title.is_some_and(|title| title.chars().count() > 256 || title.chars().any(char::is_control))
+    {
+        return Err(ApiError::BadRequest {
+            message: "title must be at most 256 characters without control characters".to_string(),
+        });
+    }
     let locale = normalize_locale(query.locale.as_deref());
     let mangas = state
         .manga_service
@@ -188,9 +259,32 @@ pub async fn search_mangas(
 }
 
 #[utoipa::path(
+    post,
+    path = "/mangas",
+    security(("write_token" = [])),
+    request_body = CreateMangaRequest,
+    responses(
+        (status = 201, description = "Local manga created", body = MangaResponse),
+        (status = 400, description = "Invalid manga data", body = ErrorResponse),
+        (status = 409, description = "Slug already exists", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse)
+    )
+)]
+pub async fn create_manga(
+    State(state): State<AppState>,
+    Json(request): Json<CreateMangaRequest>,
+) -> Result<(StatusCode, Json<MangaResponse>), ApiError> {
+    state
+        .manga_service
+        .create_manual_manga(request)
+        .await
+        .map(|manga| (StatusCode::CREATED, Json(manga)))
+}
+
+#[utoipa::path(
     get,
     path = "/mangas/{manga_ref}",
-    security(("api_token" = [])),
+    security(("read_token" = [])),
     params(
         MangaDetailQuery,
         ("manga_ref" = String, Path, description = "Internal UUID, slug, or MangaDex UUID")
@@ -207,6 +301,7 @@ pub async fn get_manga(
     axum::extract::Path(manga_ref): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MangaDetailQuery>,
 ) -> Result<Json<MangaResponse>, ApiError> {
+    validate_manga_ref(&manga_ref)?;
     let locale = normalize_locale(query.locale.as_deref());
     state
         .manga_service
@@ -223,7 +318,7 @@ pub async fn get_manga(
 #[utoipa::path(
     get,
     path = "/mangas/{manga_ref}/volumes",
-    security(("api_token" = [])),
+    security(("read_token" = [])),
     params(
         MangaVolumesQuery,
         ("manga_ref" = String, Path, description = "Internal UUID, slug, or MangaDex UUID")
@@ -240,6 +335,7 @@ pub async fn get_manga_volumes(
     axum::extract::Path(manga_ref): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<MangaVolumesQuery>,
 ) -> Result<Json<Vec<MangaVolumeResponse>>, ApiError> {
+    validate_manga_ref(&manga_ref)?;
     let (limit, offset) = pagination(query.limit, query.offset, 50)?;
     let locale = normalize_locale(query.locale.as_deref());
     state
@@ -257,9 +353,62 @@ pub async fn get_manga_volumes(
 }
 
 #[utoipa::path(
+    post,
+    path = "/mangas/{manga_ref}/covers",
+    security(("write_token" = [])),
+    params(("manga_ref" = String, Path, description = "Internal UUID or slug")),
+    request_body = CreateMangaCoverRequest,
+    responses(
+        (status = 201, description = "Local manga cover created", body = MangaCoverResponse),
+        (status = 400, description = "Invalid cover data", body = ErrorResponse),
+        (status = 404, description = "Manga not found", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse)
+    )
+)]
+pub async fn create_manga_cover(
+    State(state): State<AppState>,
+    axum::extract::Path(manga_ref): axum::extract::Path<String>,
+    Json(request): Json<CreateMangaCoverRequest>,
+) -> Result<(StatusCode, Json<MangaCoverResponse>), ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    state
+        .manga_service
+        .create_manual_cover(&manga_ref, request)
+        .await
+        .map(|cover| (StatusCode::CREATED, Json(cover)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/mangas/{manga_ref}/volumes",
+    security(("write_token" = [])),
+    params(("manga_ref" = String, Path, description = "Internal UUID or slug")),
+    request_body = CreateMangaVolumeRequest,
+    responses(
+        (status = 201, description = "Local manga volume created", body = MangaVolumeResponse),
+        (status = 400, description = "Invalid volume data", body = ErrorResponse),
+        (status = 404, description = "Manga not found", body = ErrorResponse),
+        (status = 409, description = "Numbered volume already exists for the locale", body = ErrorResponse),
+        (status = 500, description = "Internal error", body = ErrorResponse)
+    )
+)]
+pub async fn create_manga_volume(
+    State(state): State<AppState>,
+    axum::extract::Path(manga_ref): axum::extract::Path<String>,
+    Json(request): Json<CreateMangaVolumeRequest>,
+) -> Result<(StatusCode, Json<MangaVolumeResponse>), ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    state
+        .manga_service
+        .create_manual_volume(&manga_ref, request)
+        .await
+        .map(|volume| (StatusCode::CREATED, Json(volume)))
+}
+
+#[utoipa::path(
     get,
     path = "/stats/mangadex-fallback",
-    security(("api_token" = [])),
+    security(("read_token" = [])),
     responses((status = 200, description = "MangaDex fallback statistics since process start", body = FallbackStatsResponse))
 )]
 pub async fn mangadex_fallback_stats(State(state): State<AppState>) -> Json<FallbackStatsResponse> {
@@ -469,6 +618,15 @@ fn normalize_locale(locale: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|locale| !locale.is_empty())
         .and_then(normalize_language)
+}
+
+fn validate_manga_ref(manga_ref: &str) -> Result<(), ApiError> {
+    if manga_ref.is_empty() || manga_ref.len() > 128 || manga_ref.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest {
+            message: "manga reference is invalid".to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn requested_language(

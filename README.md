@@ -27,7 +27,10 @@ Migrations live in `migrations/` and are intended to be compatible with `sqlx`.
 ## Run The API
 
 ```sh
-DATABASE_URL=postgres://mangako:mangako@localhost:5432/mangako_api API_TOKEN=change-me cargo run
+DATABASE_URL=postgres://mangako:mangako@localhost:5432/mangako_api \
+API_READ_TOKEN=replace-with-a-unique-32-character-read-token \
+API_WRITE_TOKEN=replace-with-a-different-32-character-write-token \
+cargo run
 ```
 
 The API listens on `127.0.0.1:3000` by default. Override it with `HTTP_ADDR`.
@@ -35,12 +38,12 @@ When running through Docker Compose, it is exposed on `localhost:3000`.
 
 ## Authentication
 
-Catalog routes require an API token configured with `API_TOKEN`.
+Read routes require `API_READ_TOKEN`. Catalog creation routes require the separate server-only `API_WRITE_TOKEN`; do not distribute it to the Android app.
 
 Send it as a Bearer token:
 
 ```sh
-curl -H 'Authorization: Bearer change-me' 'http://localhost:3000/mangas?title=frieren'
+curl -H 'Authorization: Bearer replace-with-the-read-token' 'http://localhost:3000/mangas?title=frieren'
 ```
 
 Public routes do not require a token: `GET /health`, `GET /docs`, and `GET /api-docs/openapi.json`.
@@ -83,9 +86,12 @@ CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64
 - `GET /api-docs/openapi.json`: OpenAPI JSON specification.
 - `GET /health`: returns `ok`.
 - `GET /stats/mangadex-fallback`: requires API token. Returns MangaDex fallback statistics since process start.
-- `GET /mangas?title={title}&limit=10&offset=0&locale={locale}`: requires API token. MangaDex defines search ordering and pagination; results are persisted locally. If MangaDex fails, the API returns a paginated local fallback. `locale` calculates `latestVolumeNumber` from that cover language; regional values are matched by base language (`pt` matches `pt-br`) and `original` selects the manga's original language. `/mangas/` with a trailing slash is also accepted.
+- `POST /mangas`: requires API token. Creates a local-only manga, including metadata, localizations, aliases, and general covers. Local-only manga are never refreshed from MangaDex and are returned by title search before MangaDex is queried.
+- `POST /mangas/{id_or_slug}/covers`: requires API token. Adds a general cover by external `sourceUrl` or internal `storageKey`; setting `isPrimary` replaces the current primary cover.
+- `POST /mangas/{id_or_slug}/volumes`: requires API token. Adds a local volume cover by external `sourceUrl`. Numbered volumes are unique per normalized number and locale; fractional and unnumbered entries are special editions.
+- `GET /mangas?title={title}&limit=10&offset=0&locale={locale}`: requires API token. Matching local-only manga are returned first; otherwise MangaDex defines search ordering and pagination, and its results are persisted locally. If MangaDex fails, the API returns a paginated local fallback. `locale` calculates `latestVolumeNumber` from that cover language; regional values are matched by base language (`pt` matches `pt-br`) and `original` selects the manga's original language. `/mangas/` with a trailing slash is also accepted.
 - `GET /mangas?limit=10&offset=0`: requires API token. Returns MangaDex titles ordered by followed count. Successful pages are cached for 6 hours.
-- `GET /mangas/{id_or_slug}?refresh=false&locale={locale}`: requires API token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt. Stale local data is served if MangaDex is unavailable. `locale` calculates `latestVolumeNumber` from that cover language, falling back to the original language when needed.
+- `GET /mangas/{id_or_slug}?refresh=false&locale={locale}`: requires the read token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt and requires the write token. Stale local data is served if MangaDex is unavailable. `locale` calculates `latestVolumeNumber` from that cover language, falling back to the original language when needed.
 - `GET /mangas/{id_or_slug}/volumes?limit=50&offset=0&refresh=false&locale={locale}`: requires API token. Returns regular volumes for `locale` plus active special editions in all languages, combined before stable ordering and pagination. Regional values match by base language (`pt` matches `pt-br`); `original` selects the manga's original language. An explicit `locale` does not fall back to another language for regular volumes. Without `locale`, it uses Japanese and falls back to the original language only when no active regular Japanese volumes exist; Japanese special editions do not block fallback. Deleted covers are excluded. Missing or stale volume data is synchronized from MangaDex. `refresh=true` forces a complete refresh and reconciles removed covers.
 
 `MangaResponse.latestVolumeNumber` contains the highest regular synchronized numeric volume for `locale` when supplied. Without `locale`, it preserves the Japanese default and falls back to the original language, then MangaDex `lastVolume`, before cover synchronization.
@@ -97,7 +103,7 @@ CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64
 - `manga_aliases`: alternate titles per language for search and MangaDex ingestion.
 - `manga_covers`: cover/image metadata, with either external `source_url` or future internal `storage_key`.
 - `creators` and `manga_creators`: MangaDex authors/artists and their manga roles.
-- `manga_volumes`: MangaDex cover records used as volume images, deduplicated by `(manga_id, volume_key, locale)` for numbered volumes.
+- `manga_volumes`: MangaDex or local cover records used as volume images, deduplicated by `(manga_id, volume_key, locale)` for numbered volumes.
 - `manga_source_syncs`: source refresh bookkeeping for incremental sync from MangaDex.
 
 User library, progress, and ownership data are intentionally not modeled in this API yet.

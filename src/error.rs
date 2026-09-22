@@ -22,8 +22,12 @@ pub enum ApiError {
     Io(#[from] std::io::Error),
     #[error("{message}")]
     BadRequest { message: String },
+    #[error("{message}")]
+    Conflict { message: String },
     #[error("missing or invalid API token")]
     Unauthorized,
+    #[error("rate limit exceeded")]
+    TooManyRequests,
     #[error("manga not found")]
     MangaNotFound,
 }
@@ -38,7 +42,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let (status, code) = match &self {
             Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "bad_request"),
+            Self::Conflict { .. } => (StatusCode::CONFLICT, "conflict"),
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::MangaNotFound => (StatusCode::NOT_FOUND, "manga_not_found"),
             Self::MissingEnv { .. } | Self::InvalidEnv { .. } | Self::InvalidAddr(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "configuration_error")

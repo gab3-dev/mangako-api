@@ -1,14 +1,15 @@
 use std::{env, net::SocketAddr, str::FromStr, time::Duration};
 
 use crate::{
+    auth::AuthConfig,
     error::ApiError,
-    operations::{CacheConfig, OperationalConfig},
+    operations::{CacheConfig, OperationalConfig, RateLimitConfig},
 };
 
 pub struct Config {
     pub database_url: String,
     pub http_addr: SocketAddr,
-    pub api_token: String,
+    pub auth: AuthConfig,
     pub operations: OperationalConfig,
 }
 
@@ -21,11 +22,21 @@ impl Config {
         let http_addr = env::var("HTTP_ADDR")
             .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
             .parse()?;
-        let api_token =
-            env::var("API_TOKEN").map_err(|_| ApiError::MissingEnv { name: "API_TOKEN" })?;
+        let read_token = required_token("API_READ_TOKEN")?;
+        let write_token = required_token("API_WRITE_TOKEN")?;
+        if read_token == write_token {
+            return Err(ApiError::InvalidEnv {
+                name: "API_WRITE_TOKEN",
+                message: "must differ from API_READ_TOKEN".to_string(),
+            });
+        }
         let cache_ttl_seconds = env_or("CACHE_TTL_SECONDS", 60)?;
         let cache_max_entries = env_or("CACHE_MAX_ENTRIES", 1_000)?;
         let cache_max_bytes = env_or("CACHE_MAX_BYTES", 64 * 1024 * 1024)?;
+        let max_json_body_bytes = env_or("MAX_JSON_BODY_BYTES", 64 * 1024)?;
+        let requests_per_minute = env_or("RATE_LIMIT_REQUESTS_PER_MINUTE", 120)?;
+        let rate_limit_max_clients = env_or("RATE_LIMIT_MAX_CLIENTS", 10_000)?;
+        let trust_proxy_headers = env_or("TRUST_PROXY_HEADERS", false)?;
 
         if cache_ttl_seconds > 0 {
             if cache_max_entries == 0 {
@@ -41,6 +52,18 @@ impl Config {
                 });
             }
         }
+        if max_json_body_bytes == 0 {
+            return Err(ApiError::InvalidEnv {
+                name: "MAX_JSON_BODY_BYTES",
+                message: "must be greater than zero".to_string(),
+            });
+        }
+        if requests_per_minute == 0 || rate_limit_max_clients == 0 {
+            return Err(ApiError::InvalidEnv {
+                name: "RATE_LIMIT_REQUESTS_PER_MINUTE",
+                message: "rate limit values must be greater than zero".to_string(),
+            });
+        }
 
         let operations = OperationalConfig {
             cache: (cache_ttl_seconds > 0).then(|| CacheConfig {
@@ -48,15 +71,35 @@ impl Config {
                 max_entries: cache_max_entries,
                 max_bytes: cache_max_bytes,
             }),
+            rate_limit: RateLimitConfig {
+                requests_per_minute,
+                max_clients: rate_limit_max_clients,
+                trust_proxy_headers,
+            },
+            max_json_body_bytes,
         };
 
         Ok(Self {
             database_url,
             http_addr,
-            api_token,
+            auth: AuthConfig {
+                read_token,
+                write_token,
+            },
             operations,
         })
     }
+}
+
+fn required_token(name: &'static str) -> Result<String, ApiError> {
+    let token = env::var(name).map_err(|_| ApiError::MissingEnv { name })?;
+    if token.len() < 32 || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(ApiError::InvalidEnv {
+            name,
+            message: "must contain at least 32 non-whitespace characters".to_string(),
+        });
+    }
+    Ok(token)
 }
 
 fn env_or<T>(name: &'static str, default: T) -> Result<T, ApiError>

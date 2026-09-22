@@ -1,12 +1,20 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashSet},
+    net::IpAddr,
+};
 
 use chrono::{DateTime, Duration, Utc};
+use reqwest::Url;
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    manga::{MangaResponse, MangaVolumeResponse, load_manga_response, requested_language},
+    manga::{
+        CreateMangaAliasRequest, CreateMangaCoverRequest, CreateMangaLocalizationRequest,
+        CreateMangaRequest, CreateMangaVolumeRequest, MangaCoverResponse, MangaResponse,
+        MangaVolumeResponse, load_manga_response, requested_language,
+    },
     mangadex::{MangaDexApi, MangaDexClient, MangaDexCover, MangaDexManga, cover_url},
     operations::FallbackRequest,
 };
@@ -23,6 +31,191 @@ where
 {
     pub fn new(pool: PgPool, mangadex: C) -> Self {
         Self { pool, mangadex }
+    }
+
+    pub async fn create_manual_manga(
+        &self,
+        request: CreateMangaRequest,
+    ) -> Result<MangaResponse, ApiError> {
+        let CreateMangaRequest {
+            slug,
+            primary_title,
+            original_language,
+            publication_demographic,
+            status,
+            year,
+            content_rating,
+            localizations,
+            aliases,
+            covers,
+        } = request;
+        let slug = required_text(slug, "slug")?;
+        let primary_title = required_text(primary_title, "primaryTitle")?;
+        validate_slug(&slug)?;
+        validate_text(&primary_title, "primaryTitle", 500)?;
+        validate_optional_text(&original_language, "originalLanguage", 35)?;
+        validate_optional_text(&publication_demographic, "publicationDemographic", 100)?;
+        validate_optional_text(&status, "status", 100)?;
+        validate_optional_text(&content_rating, "contentRating", 100)?;
+        validate_year(year)?;
+        validate_localizations(&localizations)?;
+        validate_aliases(&aliases)?;
+        if localizations.len() > 32 || aliases.len() > 64 || covers.len() > 16 {
+            return Err(ApiError::BadRequest {
+                message: "too many localizations, aliases, or covers".to_string(),
+            });
+        }
+        if covers.iter().filter(|cover| cover.is_primary).count() > 1 {
+            return Err(ApiError::BadRequest {
+                message: "only one cover can be primary".to_string(),
+            });
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let manga_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            INSERT INTO mangas (
+                slug, primary_title, original_language, publication_demographic,
+                status, year, content_rating
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (slug) DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(&slug)
+        .bind(&primary_title)
+        .bind(optional_text(original_language))
+        .bind(optional_text(publication_demographic))
+        .bind(optional_text(status))
+        .bind(year)
+        .bind(optional_text(content_rating))
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(manga_id) = manga_id else {
+            return Err(ApiError::Conflict {
+                message: "a manga with this slug already exists".to_string(),
+            });
+        };
+
+        for localization in localizations {
+            sqlx::query(
+                r#"
+                INSERT INTO manga_localizations (manga_id, language, title, description, is_primary)
+                VALUES ($1, $2, $3, $4, $5)
+                "#,
+            )
+            .bind(manga_id)
+            .bind(normalize_language_value(&localization.language))
+            .bind(optional_text(localization.title))
+            .bind(optional_text(localization.description))
+            .bind(localization.is_primary)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for alias in aliases {
+            sqlx::query(
+                "INSERT INTO manga_aliases (manga_id, language, title) VALUES ($1, $2, $3)",
+            )
+            .bind(manga_id)
+            .bind(normalize_language_value(&alias.language))
+            .bind(required_text(alias.title, "alias title")?)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for cover in covers {
+            insert_manual_cover(&mut tx, manga_id, cover).await?;
+        }
+        tx.commit().await?;
+
+        load_manga_response(&self.pool, &manga_id.to_string(), None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)
+    }
+
+    pub async fn create_manual_cover(
+        &self,
+        manga_ref: &str,
+        request: CreateMangaCoverRequest,
+    ) -> Result<MangaCoverResponse, ApiError> {
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        let mut tx = self.pool.begin().await?;
+        let cover = insert_manual_cover(&mut tx, manga.id, request).await?;
+        tx.commit().await?;
+        Ok(cover)
+    }
+
+    pub async fn create_manual_volume(
+        &self,
+        manga_ref: &str,
+        request: CreateMangaVolumeRequest,
+    ) -> Result<MangaVolumeResponse, ApiError> {
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        let file_name = required_text(request.file_name, "fileName")?;
+        let source_url = required_text(request.source_url, "sourceUrl")?;
+        let volume = optional_text(request.volume);
+        validate_file_name(&file_name)?;
+        validate_url(&source_url)?;
+        if let Some(volume) = &volume {
+            validate_text(volume, "volume", 32)?;
+        }
+        let volume_key = volume.as_deref().and_then(normalized_volume_key);
+        let locale = request
+            .locale
+            .map(|locale| required_text(locale, "locale"))
+            .transpose()?
+            .map(|locale| normalize_language_value(&locale))
+            .unwrap_or_else(|| "und".to_string());
+        let is_special_edition =
+            volume_key.is_none() || is_fractional_volume_key(volume_key.as_deref());
+
+        if let Some(volume_key) = &volume_key {
+            let exists: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS(
+                    SELECT 1 FROM manga_volumes
+                    WHERE manga_id = $1 AND volume_key = $2 AND locale = $3 AND deleted_at IS NULL
+                )
+                "#,
+            )
+            .bind(manga.id)
+            .bind(volume_key)
+            .bind(&locale)
+            .fetch_one(&self.pool)
+            .await?;
+            if exists {
+                return Err(ApiError::Conflict {
+                    message: "a numbered volume already exists for this locale".to_string(),
+                });
+            }
+        }
+
+        sqlx::query_as::<_, MangaVolumeResponse>(
+            r#"
+            INSERT INTO manga_volumes (
+                manga_id, file_name, source_url, volume, volume_key, locale, is_special_edition
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, mangadex_cover_id, file_name, source_url, volume, volume_key,
+                      locale, is_special_edition, source_created_at, source_updated_at, updated_at
+            "#,
+        )
+        .bind(manga.id)
+        .bind(file_name)
+        .bind(source_url)
+        .bind(volume)
+        .bind(volume_key)
+        .bind(locale)
+        .bind(is_special_edition)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_unique_violation)
     }
 
     pub async fn get_manga(
@@ -135,12 +328,22 @@ where
         locale: Option<&str>,
         fallback: Option<&FallbackRequest>,
     ) -> Result<Vec<MangaResponse>, ApiError> {
+        if let Some(title) = title {
+            let manual_results =
+                search_local_mangas(&self.pool, Some(title), limit, offset, locale, true)
+                    .await
+                    .map_err(ApiError::from)?;
+            if !manual_results.is_empty() {
+                return Ok(manual_results);
+            }
+        }
+
         let remote_results = match self.mangadex.search_mangas(title, offset, limit).await {
             Ok(results) => results,
             Err(error) => {
-                tracing::warn!(%error, ?title, limit, offset, "MangaDex search failed; using local fallback");
+                tracing::warn!(%error, has_title = title.is_some(), limit, offset, "MangaDex search failed; using local fallback");
                 record_fallback(fallback);
-                return search_local_mangas(&self.pool, title, limit, offset, locale)
+                return search_local_mangas(&self.pool, title, limit, offset, locale, false)
                     .await
                     .map_err(ApiError::from);
             }
@@ -440,12 +643,296 @@ fn record_fallback(fallback: Option<&FallbackRequest>) {
     }
 }
 
+async fn insert_manual_cover(
+    tx: &mut Transaction<'_, Postgres>,
+    manga_id: Uuid,
+    request: CreateMangaCoverRequest,
+) -> Result<MangaCoverResponse, ApiError> {
+    let cover_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM manga_covers WHERE manga_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(manga_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if cover_count >= 16 {
+        return Err(ApiError::BadRequest {
+            message: "a manga can have at most 16 active covers".to_string(),
+        });
+    }
+    let source_url = optional_text(request.source_url);
+    let storage_key = optional_text(request.storage_key);
+    if source_url.is_none() && storage_key.is_none() {
+        return Err(ApiError::BadRequest {
+            message: "a cover requires sourceUrl or storageKey".to_string(),
+        });
+    }
+    if source_url.is_some() && storage_key.is_some() {
+        return Err(ApiError::BadRequest {
+            message: "a cover cannot have both sourceUrl and storageKey".to_string(),
+        });
+    }
+    if let Some(source_url) = &source_url {
+        validate_url(source_url)?;
+    }
+    if let Some(storage_key) = &storage_key {
+        validate_storage_key(storage_key)?;
+    }
+    if let Some(file_name) = request.file_name.as_deref() {
+        validate_file_name(file_name)?;
+    }
+    if let Some(locale) = request.locale.as_deref() {
+        validate_language(locale, "locale")?;
+    }
+    if let Some(volume) = request.volume.as_deref() {
+        validate_text(volume.trim(), "volume", 32)?;
+    }
+
+    if request.is_primary {
+        sqlx::query(
+            "UPDATE manga_covers SET is_primary = false WHERE manga_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(manga_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    sqlx::query_as::<_, MangaCoverResponse>(
+        r#"
+        INSERT INTO manga_covers (
+            manga_id, file_name, source_url, storage_key, locale, volume, is_primary
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id, mangadex_cover_id, file_name, source_url, storage_key, locale, volume,
+                  is_primary, source_updated_at, updated_at
+        "#,
+    )
+    .bind(manga_id)
+    .bind(optional_text(request.file_name))
+    .bind(source_url)
+    .bind(storage_key)
+    .bind(
+        request
+            .locale
+            .map(|locale| normalize_language_value(&locale)),
+    )
+    .bind(optional_text(request.volume))
+    .bind(request.is_primary)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(ApiError::from)
+}
+
+fn required_text(value: String, field: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ApiError::BadRequest {
+            message: format!("{field} must not be blank"),
+        });
+    }
+    Ok(value.to_string())
+}
+
+fn validate_text(value: &str, field: &str, maximum: usize) -> Result<(), ApiError> {
+    if value.chars().count() > maximum || value.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest {
+            message: format!("{field} exceeds its allowed size or contains control characters"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_optional_text(
+    value: &Option<String>,
+    field: &str,
+    maximum: usize,
+) -> Result<(), ApiError> {
+    if let Some(value) = value.as_deref().filter(|value| !value.trim().is_empty()) {
+        validate_text(value, field, maximum)?;
+    }
+    Ok(())
+}
+
+fn validate_slug(slug: &str) -> Result<(), ApiError> {
+    if slug.len() > 100
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+        || slug.contains("--")
+        || !slug
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(ApiError::BadRequest {
+            message: "slug must use lowercase ASCII letters, numbers, and single hyphens"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_file_name(file_name: &str) -> Result<(), ApiError> {
+    if file_name.len() > 255
+        || file_name == "."
+        || file_name == ".."
+        || file_name.contains(['/', '\\'])
+        || file_name.chars().any(char::is_control)
+    {
+        return Err(ApiError::BadRequest {
+            message: "fileName must be a safe basename up to 255 characters".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_url(value: &str) -> Result<(), ApiError> {
+    if value.len() > 2_048 || value.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest {
+            message: "sourceUrl is invalid".to_string(),
+        });
+    }
+    let url = Url::parse(value).map_err(|_| ApiError::BadRequest {
+        message: "sourceUrl must be an absolute HTTPS URL".to_string(),
+    })?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ApiError::BadRequest {
+            message: "sourceUrl must be an HTTPS URL without credentials or fragments".to_string(),
+        });
+    }
+    if let Some(ip) = url.host_str().and_then(|host| host.parse::<IpAddr>().ok())
+        && (ip.is_loopback()
+            || ip.is_unspecified()
+            || matches!(ip, IpAddr::V4(ip) if ip.is_private() || ip.is_link_local() || ip.is_multicast()))
+    {
+        return Err(ApiError::BadRequest {
+            message: "sourceUrl must not use a private or local IP address".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_storage_key(value: &str) -> Result<(), ApiError> {
+    if value.len() > 512
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
+    {
+        return Err(ApiError::BadRequest {
+            message: "storageKey must be a safe relative object key".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_language(value: &str, field: &str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 35
+        || value
+            .split('-')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        return Err(ApiError::BadRequest {
+            message: format!("{field} must be a valid language tag"),
+        });
+    }
+    Ok(())
+}
+
+fn optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn normalize_language_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn validate_year(year: Option<i32>) -> Result<(), ApiError> {
+    if year.is_some_and(|year| !(1900..=2200).contains(&year)) {
+        return Err(ApiError::BadRequest {
+            message: "year must be between 1900 and 2200".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn map_unique_violation(error: sqlx::Error) -> ApiError {
+    if error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|code| code == "23505")
+    {
+        return ApiError::Conflict {
+            message: "a record with this identity already exists".to_string(),
+        };
+    }
+    ApiError::Database(error)
+}
+
+fn validate_localizations(
+    localizations: &[CreateMangaLocalizationRequest],
+) -> Result<(), ApiError> {
+    let mut languages = HashSet::new();
+    let mut primary_count = 0;
+    for localization in localizations {
+        let language = required_text(localization.language.clone(), "localization language")?;
+        validate_language(&language, "localization language")?;
+        if !languages.insert(normalize_language_value(&language)) {
+            return Err(ApiError::BadRequest {
+                message: "localization languages must be unique".to_string(),
+            });
+        }
+        if optional_text(localization.title.clone()).is_none()
+            && optional_text(localization.description.clone()).is_none()
+        {
+            return Err(ApiError::BadRequest {
+                message: "a localization requires title or description".to_string(),
+            });
+        }
+        validate_optional_text(&localization.title, "localization title", 500)?;
+        validate_optional_text(
+            &localization.description,
+            "localization description",
+            10_000,
+        )?;
+        primary_count += usize::from(localization.is_primary);
+    }
+    if primary_count > 1 {
+        return Err(ApiError::BadRequest {
+            message: "only one localization can be primary".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_aliases(aliases: &[CreateMangaAliasRequest]) -> Result<(), ApiError> {
+    for alias in aliases {
+        let language = required_text(alias.language.clone(), "alias language")?;
+        let title = required_text(alias.title.clone(), "alias title")?;
+        validate_language(&language, "alias language")?;
+        validate_text(&title, "alias title", 500)?;
+    }
+    Ok(())
+}
+
 async fn search_local_mangas(
     pool: &PgPool,
     title: Option<&str>,
     limit: u32,
     offset: u32,
     locale: Option<&str>,
+    manual_only: bool,
 ) -> Result<Vec<MangaResponse>, sqlx::Error> {
     let manga_ids = if let Some(title) = title {
         let pattern = format!("%{title}%");
@@ -454,6 +941,7 @@ async fn search_local_mangas(
             SELECT m.id
             FROM mangas m
             WHERE m.deleted_at IS NULL
+              AND (NOT $5 OR m.mangadex_id IS NULL)
               AND (
                   m.primary_title ILIKE $1
                   OR EXISTS (
@@ -476,6 +964,7 @@ async fn search_local_mangas(
         .bind(title)
         .bind(i64::from(limit))
         .bind(i64::from(offset))
+        .bind(manual_only)
         .fetch_all(pool)
         .await?
     } else {

@@ -1,10 +1,11 @@
 # Comandos curl da API
 
-Defina a URL da API e o mesmo token configurado em `API_TOKEN`:
+Defina a URL da API, o token de leitura distribuído ao cliente e o token de escrita mantido apenas no servidor:
 
 ```sh
 export MANGAKO_API_URL='http://localhost:3000'
-export MANGAKO_API_TOKEN='change-me'
+export MANGAKO_API_READ_TOKEN='replace-with-the-read-token'
+export MANGAKO_API_WRITE_TOKEN='replace-with-the-server-only-write-token'
 ```
 
 ## Health check
@@ -40,7 +41,7 @@ Rota protegida por API token:
 
 ```sh
 curl --fail-with-body --get \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_READ_TOKEN" \
   --data-urlencode 'title=frieren' \
   --data-urlencode 'limit=6' \
   --data-urlencode 'offset=0' \
@@ -53,7 +54,7 @@ Sem `title`, a API consulta o MangaDex por quantidade de seguidores e mantém ca
 
 ```sh
 curl --fail-with-body --get \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_READ_TOKEN" \
   --data-urlencode 'limit=6' \
   --data-urlencode 'offset=0' \
   "$MANGAKO_API_URL/mangas"
@@ -63,7 +64,7 @@ A variante com barra final tambem e aceita:
 
 ```sh
 curl --fail-with-body --get \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_READ_TOKEN" \
   --data-urlencode 'title=frieren' \
   "$MANGAKO_API_URL/mangas/"
 ```
@@ -80,7 +81,7 @@ Rota protegida por API token:
 
 ```sh
 curl --fail-with-body \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_READ_TOKEN" \
   "$MANGAKO_API_URL/mangas/$MANGA_REF"
 ```
 
@@ -88,9 +89,60 @@ Para forçar atualização no MangaDex e invalidar o cache desse endpoint:
 
 ```sh
 curl --fail-with-body --get \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_WRITE_TOKEN" \
   --data-urlencode 'refresh=true' \
   "$MANGAKO_API_URL/mangas/$MANGA_REF"
+```
+
+## Criar manga local
+
+Cria um manga que nao possui registro no MangaDex. Capas gerais aceitam uma URL externa em `sourceUrl` ou uma futura chave interna em `storageKey`; cada capa de volume usa `sourceUrl`.
+
+```sh
+curl --fail-with-body --request POST \
+  --header "Authorization: Bearer $MANGAKO_API_WRITE_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "slug": "meu-manga",
+    "primaryTitle": "Meu Manga",
+    "originalLanguage": "pt-br",
+    "localizations": [{
+      "language": "pt-br",
+      "title": "Meu Manga",
+      "description": "Descricao criada localmente",
+      "isPrimary": true
+    }],
+    "covers": [{
+      "sourceUrl": "https://example.com/meu-manga.jpg",
+      "isPrimary": true
+    }]
+  }' \
+  "$MANGAKO_API_URL/mangas"
+```
+
+Use o `id` ou `slug` retornado para criar uma capa geral adicional:
+
+```sh
+curl --fail-with-body --request POST \
+  --header "Authorization: Bearer $MANGAKO_API_WRITE_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{"sourceUrl":"https://example.com/nova-capa.jpg","isPrimary":true}' \
+  "$MANGAKO_API_URL/mangas/meu-manga/covers"
+```
+
+## Criar volume local
+
+```sh
+curl --fail-with-body --request POST \
+  --header "Authorization: Bearer $MANGAKO_API_WRITE_TOKEN" \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "fileName": "volume-1.jpg",
+    "sourceUrl": "https://example.com/volume-1.jpg",
+    "volume": "1",
+    "locale": "pt-br"
+  }' \
+  "$MANGAKO_API_URL/mangas/meu-manga/volumes"
 ```
 
 ## Consultar volumes do manga
@@ -101,7 +153,7 @@ Sem `locale`, os volumes normais usam japones, com fallback para o idioma origin
 
 ```sh
 curl --fail-with-body --get \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_READ_TOKEN" \
   --data-urlencode 'limit=50' \
   --data-urlencode 'offset=0' \
   "$MANGAKO_API_URL/mangas/$MANGA_REF/volumes"
@@ -111,7 +163,7 @@ Para forçar sincronização completa e reconciliação das capas removidas:
 
 ```sh
 curl --fail-with-body --get \
-  --header "Authorization: Bearer $MANGAKO_API_TOKEN" \
+  --header "Authorization: Bearer $MANGAKO_API_READ_TOKEN" \
   --data-urlencode 'limit=50' \
   --data-urlencode 'offset=0' \
   --data-urlencode 'refresh=true' \

@@ -10,6 +10,7 @@ async fn health_returns_ok() {
     let app = mangako_api::api::router(pool);
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/health")
@@ -77,6 +78,13 @@ async fn openapi_and_swagger_ui_are_served() {
             .get("latestVolumeNumber")
             .is_some()
     );
+    for path in [
+        "/mangas",
+        "/mangas/{manga_ref}/covers",
+        "/mangas/{manga_ref}/volumes",
+    ] {
+        assert!(openapi["paths"][path]["post"].is_object(), "{path}");
+    }
     assert!(openapi["paths"].get("/stats/mangadex-fallback").is_some());
 
     let docs_response = app
@@ -91,7 +99,11 @@ async fn manga_routes_require_api_token_when_configured() {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://mangako:mangako@localhost:5432/mangako_api")
         .expect("valid database URL");
-    let app = mangako_api::api::router_with_api_token(pool, "secret-token".to_string());
+    let app = mangako_api::api::router_with_api_tokens(
+        pool,
+        "read-token-for-tests".to_string(),
+        "write-token-for-tests".to_string(),
+    );
 
     let response = app
         .clone()
@@ -119,16 +131,111 @@ async fn manga_routes_require_api_token_when_configured() {
     assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/mangas?limit=0")
-                .header(axum::http::header::AUTHORIZATION, "Bearer secret-token")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer read-token-for-tests",
+                )
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let read_token_cannot_write = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mangas")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer read-token-for-tests",
+                )
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        read_token_cannot_write.status(),
+        axum::http::StatusCode::UNAUTHORIZED
+    );
+
+    let write_token_cannot_read = app
+        .oneshot(
+            Request::builder()
+                .uri("/mangas?limit=0")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer write-token-for-tests",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        write_token_cannot_read.status(),
+        axum::http::StatusCode::UNAUTHORIZED
+    );
+
+    let read_token_cannot_refresh = mangako_api::api::router_with_api_tokens(
+        PgPoolOptions::new()
+            .connect_lazy("postgres://mangako:mangako@localhost:5432/mangako_api")
+            .expect("valid database URL"),
+        "read-token-for-tests".to_string(),
+        "write-token-for-tests".to_string(),
+    )
+    .oneshot(
+        Request::builder()
+            .uri("/mangas/example?refresh=true")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                "Bearer read-token-for-tests",
+            )
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_token_cannot_refresh.status(),
+        axum::http::StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn write_payloads_are_size_limited_before_database_access() {
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://mangako:mangako@localhost:5432/mangako_api")
+        .expect("valid database URL");
+    let app = mangako_api::api::router_with_api_tokens(
+        pool,
+        "read-token-for-tests".to_string(),
+        "write-token-for-tests".to_string(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mangas")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer write-token-for-tests",
+                )
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b'x'; 64 * 1024 + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
@@ -136,7 +243,11 @@ async fn health_and_docs_stay_public_when_api_token_is_configured() {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://mangako:mangako@localhost:5432/mangako_api")
         .expect("valid database URL");
-    let app = mangako_api::api::router_with_api_token(pool, "secret-token".to_string());
+    let app = mangako_api::api::router_with_api_tokens(
+        pool,
+        "read-token-for-tests".to_string(),
+        "write-token-for-tests".to_string(),
+    );
 
     let health_response = app
         .clone()
@@ -167,7 +278,11 @@ async fn mangadex_fallback_stats_require_an_api_token() {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://mangako:mangako@localhost:5432/mangako_api")
         .expect("valid database URL");
-    let app = mangako_api::api::router_with_api_token(pool, "secret-token".to_string());
+    let app = mangako_api::api::router_with_api_tokens(
+        pool,
+        "read-token-for-tests".to_string(),
+        "write-token-for-tests".to_string(),
+    );
 
     let unauthorized = app
         .clone()
@@ -185,7 +300,10 @@ async fn mangadex_fallback_stats_require_an_api_token() {
         .oneshot(
             Request::builder()
                 .uri("/stats/mangadex-fallback")
-                .header(axum::http::header::AUTHORIZATION, "Bearer secret-token")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer read-token-for-tests",
+                )
                 .body(Body::empty())
                 .unwrap(),
         )

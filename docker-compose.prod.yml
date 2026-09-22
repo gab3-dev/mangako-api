@@ -1,4 +1,13 @@
 services:
+  caddy-init:
+    image: caddy:2.10.2-alpine
+    restart: "no"
+    command: ["/bin/sh", "-c", "install -m 644 /source/authenticated-origin-pull-ca.pem /data/authenticated-origin-pull-ca.pem && chown -R 1000:1000 /data /config"]
+    volumes:
+      - ./deploy/authenticated_origin_pull_ca.pem:/source/authenticated-origin-pull-ca.pem:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
   caddy:
     image: caddy:2.10.2-alpine
     pull_policy: always
@@ -12,13 +21,20 @@ services:
       - caddy-data:/data
       - caddy-config:/config
     depends_on:
+      caddy-init:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
+    user: "1000:1000"
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
     stop_grace_period: 30s
     logging:
       driver: json-file
@@ -29,14 +45,20 @@ services:
       - edge
 
   api:
-    image: ${MANGAKO_API_IMAGE:-ghcr.io/gab3-dev/mangako-api:latest}
+    image: ${MANGAKO_API_IMAGE:?set an immutable GHCR image digest}
     pull_policy: always
     restart: unless-stopped
     init: true
+    user: "10001:10001"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-mangako}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-mangako_api}
       HTTP_ADDR: 0.0.0.0:3000
-      API_TOKEN: ${API_TOKEN:?set API_TOKEN}
+      API_READ_TOKEN: ${API_READ_TOKEN:?set API_READ_TOKEN}
+      API_WRITE_TOKEN: ${API_WRITE_TOKEN:?set API_WRITE_TOKEN}
+      MAX_JSON_BODY_BYTES: ${MAX_JSON_BODY_BYTES:-65536}
+      RATE_LIMIT_REQUESTS_PER_MINUTE: ${RATE_LIMIT_REQUESTS_PER_MINUTE:-120}
+      RATE_LIMIT_MAX_CLIENTS: ${RATE_LIMIT_MAX_CLIENTS:-10000}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-true}
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
       CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-1000}
       CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-67108864}

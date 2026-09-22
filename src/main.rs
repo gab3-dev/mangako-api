@@ -19,7 +19,7 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
     db::migrate(&pool).await?;
     let app = operations::with_observability(api::router_with_operations(
         pool,
-        config.api_token,
+        config.auth,
         config.operations,
     ));
 
