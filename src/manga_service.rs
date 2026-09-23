@@ -13,7 +13,8 @@ use crate::{
     manga::{
         CreateMangaAliasRequest, CreateMangaCoverRequest, CreateMangaLocalizationRequest,
         CreateMangaRequest, CreateMangaVolumeRequest, MangaCoverResponse, MangaResponse,
-        MangaVolumeResponse, load_manga_response, requested_language,
+        MangaVolumeResponse, UpdateMangaRequest, UpdateMangaVolumeRequest, load_manga_response,
+        requested_language,
     },
     mangadex::{MangaDexApi, MangaDexClient, MangaDexCover, MangaDexManga, cover_url},
     operations::FallbackRequest,
@@ -216,6 +217,181 @@ where
         .fetch_one(&self.pool)
         .await
         .map_err(map_unique_violation)
+    }
+
+    pub async fn update_manga(
+        &self,
+        manga_ref: &str,
+        request: UpdateMangaRequest,
+    ) -> Result<MangaResponse, ApiError> {
+        if !manga_patch_has_fields(&request) {
+            return Err(ApiError::BadRequest {
+                message: "at least one manga field is required".to_string(),
+            });
+        }
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        let slug = required_patch_text(request.slug, "slug")?;
+        let primary_title = required_patch_text(request.primary_title, "primaryTitle")?;
+        if let Some(Some(slug)) = &slug {
+            validate_slug(slug)?;
+        }
+        if let Some(Some(primary_title)) = &primary_title {
+            validate_text(primary_title, "primaryTitle", 500)?;
+        }
+        let original_language =
+            optional_text_patch(request.original_language, "originalLanguage", 35)?;
+        let publication_demographic = optional_text_patch(
+            request.publication_demographic,
+            "publicationDemographic",
+            100,
+        )?;
+        let status = optional_text_patch(request.status, "status", 100)?;
+        let content_rating = optional_text_patch(request.content_rating, "contentRating", 100)?;
+        let year = request.year;
+        if let Some(year) = year.flatten() {
+            validate_year(Some(year))?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE mangas
+            SET slug = CASE WHEN $2 THEN $1 ELSE slug END,
+                primary_title = CASE WHEN $4 THEN $3 ELSE primary_title END,
+                original_language = CASE WHEN $6 THEN $5 ELSE original_language END,
+                publication_demographic = CASE WHEN $8 THEN $7 ELSE publication_demographic END,
+                status = CASE WHEN $10 THEN $9 ELSE status END,
+                year = CASE WHEN $12 THEN $11 ELSE year END,
+                content_rating = CASE WHEN $14 THEN $13 ELSE content_rating END
+            WHERE id = $15 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(slug.clone().flatten())
+        .bind(slug.is_some())
+        .bind(primary_title.clone().flatten())
+        .bind(primary_title.is_some())
+        .bind(original_language.clone().flatten())
+        .bind(original_language.is_some())
+        .bind(publication_demographic.clone().flatten())
+        .bind(publication_demographic.is_some())
+        .bind(status.clone().flatten())
+        .bind(status.is_some())
+        .bind(year.flatten())
+        .bind(year.is_some())
+        .bind(content_rating.clone().flatten())
+        .bind(content_rating.is_some())
+        .bind(manga.id)
+        .execute(&self.pool)
+        .await
+        .map_err(map_unique_violation)?;
+
+        load_manga_response(&self.pool, &manga.id.to_string(), None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)
+    }
+
+    pub async fn delete_manga(&self, manga_ref: &str) -> Result<(), ApiError> {
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        sqlx::query("UPDATE mangas SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL")
+            .bind(manga.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_manga_volume(
+        &self,
+        manga_ref: &str,
+        volume_id: Uuid,
+        request: UpdateMangaVolumeRequest,
+    ) -> Result<MangaVolumeResponse, ApiError> {
+        if !volume_patch_has_fields(&request) {
+            return Err(ApiError::BadRequest {
+                message: "at least one volume field is required".to_string(),
+            });
+        }
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, MutableVolumeRow>(
+            r#"
+            SELECT file_name, source_url, volume, locale
+            FROM manga_volumes
+            WHERE id = $1 AND manga_id = $2 AND deleted_at IS NULL
+            FOR UPDATE
+            "#,
+        )
+        .bind(volume_id)
+        .bind(manga.id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(ApiError::VolumeNotFound)?;
+        let file_name = required_patch_value(request.file_name, current.file_name, "fileName")?;
+        let source_url = required_patch_value(request.source_url, current.source_url, "sourceUrl")?;
+        let volume = match request.volume {
+            Some(value) => optional_text(value),
+            None => current.volume,
+        };
+        let locale = required_patch_value(request.locale, current.locale, "locale")?;
+        validate_file_name(&file_name)?;
+        validate_url(&source_url)?;
+        if let Some(volume) = &volume {
+            validate_text(volume, "volume", 32)?;
+        }
+        validate_language(&locale, "locale")?;
+        let locale = normalize_language_value(&locale);
+        let volume_key = volume.as_deref().and_then(normalized_volume_key);
+        let is_special_edition =
+            volume_key.is_none() || is_fractional_volume_key(volume_key.as_deref());
+
+        let volume = sqlx::query_as::<_, MangaVolumeResponse>(
+            r#"
+            UPDATE manga_volumes
+            SET file_name = $1, source_url = $2, volume = $3, volume_key = $4,
+                locale = $5, is_special_edition = $6
+            WHERE id = $7 AND manga_id = $8 AND deleted_at IS NULL
+            RETURNING id, mangadex_cover_id, file_name, source_url, volume, volume_key,
+                      locale, is_special_edition, source_created_at, source_updated_at, updated_at
+            "#,
+        )
+        .bind(file_name)
+        .bind(source_url)
+        .bind(volume)
+        .bind(volume_key)
+        .bind(locale)
+        .bind(is_special_edition)
+        .bind(volume_id)
+        .bind(manga.id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_unique_violation)?;
+        tx.commit().await?;
+        Ok(volume)
+    }
+
+    pub async fn delete_manga_volume(
+        &self,
+        manga_ref: &str,
+        volume_id: Uuid,
+    ) -> Result<(), ApiError> {
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        let deleted = sqlx::query(
+            "UPDATE manga_volumes SET deleted_at = now() WHERE id = $1 AND manga_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(volume_id)
+        .bind(manga.id)
+        .execute(&self.pool)
+        .await?;
+        if deleted.rows_affected() == 0 {
+            return Err(ApiError::VolumeNotFound);
+        }
+        Ok(())
     }
 
     pub async fn get_manga(
@@ -640,6 +816,71 @@ where
 fn record_fallback(fallback: Option<&FallbackRequest>) {
     if let Some(fallback) = fallback {
         fallback.record();
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct MutableVolumeRow {
+    file_name: String,
+    source_url: String,
+    volume: Option<String>,
+    locale: String,
+}
+
+fn manga_patch_has_fields(request: &UpdateMangaRequest) -> bool {
+    request.slug.is_some()
+        || request.primary_title.is_some()
+        || request.original_language.is_some()
+        || request.publication_demographic.is_some()
+        || request.status.is_some()
+        || request.year.is_some()
+        || request.content_rating.is_some()
+}
+
+fn volume_patch_has_fields(request: &UpdateMangaVolumeRequest) -> bool {
+    request.file_name.is_some()
+        || request.source_url.is_some()
+        || request.volume.is_some()
+        || request.locale.is_some()
+}
+
+fn required_patch_text(
+    value: Option<Option<String>>,
+    field: &str,
+) -> Result<Option<Option<String>>, ApiError> {
+    match value {
+        Some(Some(value)) => Ok(Some(Some(required_text(value, field)?))),
+        Some(None) => Err(ApiError::BadRequest {
+            message: format!("{field} must not be null"),
+        }),
+        None => Ok(None),
+    }
+}
+
+fn optional_text_patch(
+    value: Option<Option<String>>,
+    field: &str,
+    maximum: usize,
+) -> Result<Option<Option<String>>, ApiError> {
+    if let Some(value) = &value
+        && let Some(value) = value.as_deref().filter(|value| !value.trim().is_empty())
+    {
+        validate_text(value, field, maximum)?;
+    }
+    Ok(value.map(optional_text))
+}
+
+fn required_patch_value(
+    value: Option<Option<String>>,
+    current: String,
+    field: &str,
+) -> Result<String, ApiError> {
+    match value {
+        Some(Some(value)) => required_text(value, field),
+        Some(None) => Err(ApiError::BadRequest {
+            message: format!("{field} must not be null"),
+        }),
+        None => Ok(current),
     }
 }
 

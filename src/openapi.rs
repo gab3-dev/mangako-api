@@ -7,6 +7,7 @@ use crate::{
         CreateMangaAliasRequest, CreateMangaCoverRequest, CreateMangaLocalizationRequest,
         CreateMangaRequest, CreateMangaVolumeRequest, MangaAliasResponse, MangaCoverResponse,
         MangaCreatorResponse, MangaLocalizationResponse, MangaResponse, MangaVolumeResponse,
+        UpdateMangaRequest, UpdateMangaVolumeRequest,
     },
     operations::FallbackStatsResponse,
 };
@@ -22,9 +23,13 @@ use crate::{
         crate::manga::search_mangas,
         crate::manga::create_manga,
         crate::manga::get_manga,
+        crate::manga::update_manga,
+        crate::manga::delete_manga,
         crate::manga::create_manga_cover,
         crate::manga::get_manga_volumes,
         crate::manga::create_manga_volume,
+        crate::manga::update_manga_volume,
+        crate::manga::delete_manga_volume,
         crate::manga::mangadex_fallback_stats
     ),
     components(
@@ -35,6 +40,8 @@ use crate::{
             CreateMangaLocalizationRequest,
             CreateMangaRequest,
             CreateMangaVolumeRequest,
+            UpdateMangaRequest,
+            UpdateMangaVolumeRequest,
             MangaAliasResponse,
             MangaCoverResponse,
             MangaCreatorResponse,

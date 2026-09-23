@@ -302,8 +302,8 @@ async fn volume_refresh_updates_latest_volume_number_in_following_manga_response
         calls: Arc::default(),
         search_results: Vec::new(),
         covers: vec![
-            manga_cover("cccccccc-cccc-cccc-cccc-cccccccccccc", "15"),
-            manga_cover("dddddddd-dddd-dddd-dddd-dddddddddddd", "16"),
+            manga_cover("c1010101-0101-0101-0101-010101010101", "15"),
+            manga_cover("d1010101-0101-0101-0101-010101010101", "16"),
         ],
     };
     let service = MangaService::new(pool.clone(), fake);
@@ -413,8 +413,8 @@ async fn alternate_titles_populate_localized_titles_without_losing_descriptions(
 async fn forced_volume_refresh_reconciles_removed_covers() {
     let pool = test_pool().await;
     let mangadex_id = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
-    let current_cover_id = Uuid::parse_str("dddddddd-dddd-dddd-dddd-dddddddddddd").unwrap();
-    let removed_cover_id = Uuid::parse_str("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee").unwrap();
+    let current_cover_id = Uuid::parse_str("d2010201-0201-0201-0201-020102010201").unwrap();
+    let removed_cover_id = Uuid::parse_str("e2010201-0201-0201-0201-020102010201").unwrap();
     cleanup_manga(&pool, mangadex_id).await;
 
     let manga_id: Uuid = sqlx::query_scalar(

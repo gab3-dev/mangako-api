@@ -163,6 +163,48 @@ pub struct CreateMangaVolumeRequest {
     pub locale: Option<String>,
 }
 
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMangaRequest {
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub slug: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub primary_title: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub original_language: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub publication_demographic: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub status: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub year: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub content_rating: Option<Option<String>>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMangaVolumeRequest {
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub file_name: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub source_url: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub volume: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_patch_field")]
+    pub locale: Option<Option<String>>,
+}
+
+fn deserialize_patch_field<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 #[derive(FromRow)]
 struct MangaRow {
     id: Uuid,
@@ -279,6 +321,51 @@ pub async fn create_manga(
         .create_manual_manga(request)
         .await
         .map(|manga| (StatusCode::CREATED, Json(manga)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/mangas/{manga_ref}",
+    security(("write_token" = [])),
+    params(("manga_ref" = String, Path, description = "Internal UUID, slug, or MangaDex UUID")),
+    request_body = UpdateMangaRequest,
+    responses(
+        (status = 200, description = "Manga updated", body = MangaResponse),
+        (status = 400, description = "Invalid manga data", body = ErrorResponse),
+        (status = 404, description = "Manga not found", body = ErrorResponse),
+        (status = 409, description = "Slug already exists", body = ErrorResponse)
+    )
+)]
+pub async fn update_manga(
+    State(state): State<AppState>,
+    axum::extract::Path(manga_ref): axum::extract::Path<String>,
+    Json(request): Json<UpdateMangaRequest>,
+) -> Result<Json<MangaResponse>, ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    state
+        .manga_service
+        .update_manga(&manga_ref, request)
+        .await
+        .map(Json)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/mangas/{manga_ref}",
+    security(("write_token" = [])),
+    params(("manga_ref" = String, Path, description = "Internal UUID, slug, or MangaDex UUID")),
+    responses(
+        (status = 204, description = "Manga deleted"),
+        (status = 404, description = "Manga not found", body = ErrorResponse)
+    )
+)]
+pub async fn delete_manga(
+    State(state): State<AppState>,
+    axum::extract::Path(manga_ref): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    state.manga_service.delete_manga(&manga_ref).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(
@@ -403,6 +490,60 @@ pub async fn create_manga_volume(
         .create_manual_volume(&manga_ref, request)
         .await
         .map(|volume| (StatusCode::CREATED, Json(volume)))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/mangas/{manga_ref}/volumes/{volume_id}",
+    security(("write_token" = [])),
+    params(
+        ("manga_ref" = String, Path, description = "Internal UUID, slug, or MangaDex UUID"),
+        ("volume_id" = Uuid, Path, description = "Internal volume UUID")
+    ),
+    request_body = UpdateMangaVolumeRequest,
+    responses(
+        (status = 200, description = "Volume updated", body = MangaVolumeResponse),
+        (status = 400, description = "Invalid volume data", body = ErrorResponse),
+        (status = 404, description = "Manga or volume not found", body = ErrorResponse),
+        (status = 409, description = "Numbered volume already exists for this locale", body = ErrorResponse)
+    )
+)]
+pub async fn update_manga_volume(
+    State(state): State<AppState>,
+    axum::extract::Path((manga_ref, volume_id)): axum::extract::Path<(String, Uuid)>,
+    Json(request): Json<UpdateMangaVolumeRequest>,
+) -> Result<Json<MangaVolumeResponse>, ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    state
+        .manga_service
+        .update_manga_volume(&manga_ref, volume_id, request)
+        .await
+        .map(Json)
+}
+
+#[utoipa::path(
+    delete,
+    path = "/mangas/{manga_ref}/volumes/{volume_id}",
+    security(("write_token" = [])),
+    params(
+        ("manga_ref" = String, Path, description = "Internal UUID, slug, or MangaDex UUID"),
+        ("volume_id" = Uuid, Path, description = "Internal volume UUID")
+    ),
+    responses(
+        (status = 204, description = "Volume deleted"),
+        (status = 404, description = "Manga or volume not found", body = ErrorResponse)
+    )
+)]
+pub async fn delete_manga_volume(
+    State(state): State<AppState>,
+    axum::extract::Path((manga_ref, volume_id)): axum::extract::Path<(String, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    state
+        .manga_service
+        .delete_manga_volume(&manga_ref, volume_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[utoipa::path(

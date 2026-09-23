@@ -85,6 +85,10 @@ async fn openapi_and_swagger_ui_are_served() {
     ] {
         assert!(openapi["paths"][path]["post"].is_object(), "{path}");
     }
+    assert!(openapi["paths"]["/mangas/{manga_ref}"]["patch"].is_object());
+    assert!(openapi["paths"]["/mangas/{manga_ref}"]["delete"].is_object());
+    assert!(openapi["paths"]["/mangas/{manga_ref}/volumes/{volume_id}"]["patch"].is_object());
+    assert!(openapi["paths"]["/mangas/{manga_ref}/volumes/{volume_id}"]["delete"].is_object());
     assert!(openapi["paths"].get("/stats/mangadex-fallback").is_some());
 
     let docs_response = app

@@ -30,6 +30,8 @@ pub enum ApiError {
     TooManyRequests,
     #[error("manga not found")]
     MangaNotFound,
+    #[error("volume not found")]
+    VolumeNotFound,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -46,6 +48,7 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::MangaNotFound => (StatusCode::NOT_FOUND, "manga_not_found"),
+            Self::VolumeNotFound => (StatusCode::NOT_FOUND, "volume_not_found"),
             Self::MissingEnv { .. } | Self::InvalidEnv { .. } | Self::InvalidAddr(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "configuration_error")
             }

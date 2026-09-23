@@ -2,7 +2,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use sqlx::PgPool;
 use std::time::Duration;
@@ -70,6 +70,10 @@ fn build_router(pool: PgPool, auth: Option<AuthConfig>, operations: OperationalC
     let mut write_catalog = Router::new()
         .route("/mangas", post(manga::create_manga))
         .route(
+            "/mangas/{manga_ref}",
+            patch(manga::update_manga).delete(manga::delete_manga),
+        )
+        .route(
             "/mangas/{manga_ref}/covers",
             post(manga::create_manga_cover),
         )
@@ -77,11 +81,20 @@ fn build_router(pool: PgPool, auth: Option<AuthConfig>, operations: OperationalC
             "/mangas/{manga_ref}/volumes",
             post(manga::create_manga_volume),
         )
+        .route(
+            "/mangas/{manga_ref}/volumes/{volume_id}",
+            patch(manga::update_manga_volume).delete(manga::delete_manga_volume),
+        )
         .layer(DefaultBodyLimit::max(operations.max_json_body_bytes));
 
     if let Some(cache) = operations.cache {
+        let cache = ResponseCache::new(cache);
         read_catalog = read_catalog.layer(middleware::from_fn_with_state(
-            ResponseCache::new(cache),
+            cache.clone(),
+            crate::operations::cache_get_response,
+        ));
+        write_catalog = write_catalog.layer(middleware::from_fn_with_state(
+            cache,
             crate::operations::cache_get_response,
         ));
     }

@@ -192,7 +192,7 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
             manga_id, mangadex_cover_id, file_name, source_url,
             volume, volume_key, locale, is_special_edition
         )
-        VALUES ($1, 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'cover-special.jpg',
+        VALUES ($1, 'e3010301-0301-0301-0301-030103010301', 'cover-special.jpg',
                 'https://example.com/cover-special.jpg', '99.2', '99.2', 'en', true)
         "#,
     )
@@ -216,9 +216,9 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
     .unwrap();
 
     for (cover_id, volume) in [
-        ("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "1"),
-        ("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "2"),
-        ("cccccccc-cccc-cccc-cccc-cccccccccccc", "3"),
+        ("a3010301-0301-0301-0301-030103010301", "1"),
+        ("b3010301-0301-0301-0301-030103010301", "2"),
+        ("c3010301-0301-0301-0301-030103010301", "3"),
     ] {
         let file_name = format!("cover-{volume}.jpg");
         let source_url =
@@ -247,7 +247,7 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
             manga_id, mangadex_cover_id, file_name, source_url,
             volume, volume_key, locale, is_special_edition
         )
-        VALUES ($1, 'dddddddd-dddd-dddd-dddd-dddddddddddd', 'cover-4.jpg',
+        VALUES ($1, 'd3010301-0301-0301-0301-030103010301', 'cover-4.jpg',
                 'https://example.com/cover-4.jpg', '4', '4', 'pt-br', false)
         "#,
     )

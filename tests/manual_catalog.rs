@@ -123,6 +123,7 @@ async fn manual_manga_can_include_metadata_covers_and_volumes() {
     let volume = response_json(volume).await;
     assert_eq!(volume["volumeKey"], "1");
     assert_eq!(volume["isSpecialEdition"], false);
+    let volume_id = volume["id"].as_str().unwrap();
 
     let duplicate = app
         .clone()
@@ -140,6 +141,44 @@ async fn manual_manga_can_include_metadata_covers_and_volumes() {
         .unwrap();
     assert_eq!(duplicate.status(), StatusCode::CONFLICT);
 
+    let updated_manga = app
+        .clone()
+        .oneshot(json_request(
+            Method::PATCH,
+            format!("/mangas/{manga_id}"),
+            json!({
+                "primaryTitle": "Updated Manual Catalog",
+                "contentRating": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated_manga.status(), StatusCode::OK);
+    let updated_manga = response_json(updated_manga).await;
+    assert_eq!(updated_manga["primaryTitle"], "Updated Manual Catalog");
+    assert!(updated_manga["contentRating"].is_null());
+
+    let updated_volume = app
+        .clone()
+        .oneshot(json_request(
+            Method::PATCH,
+            format!("/mangas/{manga_id}/volumes/{volume_id}"),
+            json!({
+                "sourceUrl": "https://example.com/updated-volume-1.jpg",
+                "volume": null
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated_volume.status(), StatusCode::OK);
+    let updated_volume = response_json(updated_volume).await;
+    assert_eq!(
+        updated_volume["sourceUrl"],
+        "https://example.com/updated-volume-1.jpg"
+    );
+    assert!(updated_volume["volume"].is_null());
+    assert!(updated_volume["volumeKey"].is_null());
+
     let detail = app
         .clone()
         .oneshot(
@@ -153,7 +192,7 @@ async fn manual_manga_can_include_metadata_covers_and_volumes() {
         .unwrap();
     assert_eq!(detail.status(), StatusCode::OK);
     let detail = response_json(detail).await;
-    assert_eq!(detail["latestVolumeNumber"], "1");
+    assert!(detail["latestVolumeNumber"].is_null());
     assert_eq!(
         detail["covers"]
             .as_array()
@@ -165,6 +204,7 @@ async fn manual_manga_can_include_metadata_covers_and_volumes() {
     );
 
     let volumes = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri(format!("/mangas/{manga_id}/volumes?locale=en"))
@@ -177,6 +217,40 @@ async fn manual_manga_can_include_metadata_covers_and_volumes() {
     assert_eq!(volumes.status(), StatusCode::OK);
     let volumes = response_json(volumes).await;
     assert_eq!(volumes.as_array().unwrap().len(), 1);
+
+    let deleted_volume = app
+        .clone()
+        .oneshot(json_request(
+            Method::DELETE,
+            format!("/mangas/{manga_id}/volumes/{volume_id}"),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted_volume.status(), StatusCode::NO_CONTENT);
+
+    let deleted_manga = app
+        .clone()
+        .oneshot(json_request(
+            Method::DELETE,
+            format!("/mangas/{manga_id}"),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted_manga.status(), StatusCode::NO_CONTENT);
+
+    let missing_manga = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/mangas/{manga_id}"))
+                .header(header::AUTHORIZATION, "Bearer manual-read-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_manga.status(), StatusCode::NOT_FOUND);
 
     sqlx::query("DELETE FROM mangas WHERE slug = 'manual-catalog-test'")
         .execute(&pool)
