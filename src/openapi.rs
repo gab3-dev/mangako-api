@@ -26,8 +26,10 @@ use crate::{
         crate::manga::update_manga,
         crate::manga::delete_manga,
         crate::manga::create_manga_cover,
+        crate::manga::upload_manga_cover,
         crate::manga::get_manga_volumes,
         crate::manga::create_manga_volume,
+        crate::manga::upload_manga_volume,
         crate::manga::update_manga_volume,
         crate::manga::delete_manga_volume,
         crate::manga::mangadex_fallback_stats

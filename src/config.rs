@@ -1,7 +1,8 @@
-use std::{env, net::SocketAddr, str::FromStr, time::Duration};
+use std::{env, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
 use crate::{
     auth::AuthConfig,
+    cover_storage::CoverStorage,
     error::ApiError,
     operations::{CacheConfig, OperationalConfig, RateLimitConfig},
 };
@@ -11,6 +12,7 @@ pub struct Config {
     pub http_addr: SocketAddr,
     pub auth: AuthConfig,
     pub operations: OperationalConfig,
+    pub cover_storage: CoverStorage,
 }
 
 impl Config {
@@ -37,6 +39,11 @@ impl Config {
         let requests_per_minute = env_or("RATE_LIMIT_REQUESTS_PER_MINUTE", 120)?;
         let rate_limit_max_clients = env_or("RATE_LIMIT_MAX_CLIENTS", 10_000)?;
         let trust_proxy_headers = env_or("TRUST_PROXY_HEADERS", false)?;
+        let cover_storage_dir =
+            env::var("COVER_STORAGE_DIR").unwrap_or_else(|_| "/var/lib/mangako/covers".to_string());
+        let cover_public_base_url = env::var("COVER_PUBLIC_BASE_URL")
+            .unwrap_or_else(|_| "http://localhost:3000/media".to_string());
+        let cover_max_upload_bytes = env_or("MAX_COVER_UPLOAD_BYTES", 8 * 1024 * 1024)?;
 
         if cache_ttl_seconds > 0 {
             if cache_max_entries == 0 {
@@ -56,6 +63,12 @@ impl Config {
             return Err(ApiError::InvalidEnv {
                 name: "MAX_JSON_BODY_BYTES",
                 message: "must be greater than zero".to_string(),
+            });
+        }
+        if cover_max_upload_bytes == 0 || cover_max_upload_bytes > 32 * 1024 * 1024 {
+            return Err(ApiError::InvalidEnv {
+                name: "MAX_COVER_UPLOAD_BYTES",
+                message: "must be between 1 and 33554432".to_string(),
             });
         }
         if requests_per_minute == 0 || rate_limit_max_clients == 0 {
@@ -87,6 +100,11 @@ impl Config {
                 write_token,
             },
             operations,
+            cover_storage: CoverStorage::new(
+                PathBuf::from(cover_storage_dir),
+                cover_public_base_url,
+                cover_max_upload_bytes,
+            ),
         })
     }
 }

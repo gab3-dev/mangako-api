@@ -17,10 +17,30 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
     let config = Config::from_env()?;
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool).await?;
-    let app = operations::with_observability(api::router_with_operations(
+    mangako_api::cover_storage::enqueue_existing_mangadex_assets(&pool).await?;
+    config.cover_storage.ensure_root().await?;
+    let worker_pool = pool.clone();
+    let worker_storage = config.cover_storage.clone();
+    tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("valid cover worker client");
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            while let Ok(true) =
+                mangako_api::cover_storage::process_next(&worker_pool, &worker_storage, &client)
+                    .await
+            {}
+        }
+    });
+    let app = operations::with_observability(api::router_with_cover_storage(
         pool,
         config.auth,
         config.operations,
+        config.cover_storage,
     ));
 
     let listener = TcpListener::bind(config.http_addr).await?;

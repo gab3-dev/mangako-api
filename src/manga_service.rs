@@ -9,6 +9,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::{
+    cover_storage::enqueue_source_asset,
     error::ApiError,
     manga::{
         CreateMangaAliasRequest, CreateMangaCoverRequest, CreateMangaLocalizationRequest,
@@ -32,6 +33,10 @@ where
 {
     pub fn new(pool: PgPool, mangadex: C) -> Self {
         Self { pool, mangadex }
+    }
+
+    pub fn pool_for_assets(&self) -> PgPool {
+        self.pool.clone()
     }
 
     pub async fn create_manual_manga(
@@ -150,6 +155,32 @@ where
         Ok(cover)
     }
 
+    pub async fn create_uploaded_cover(
+        &self,
+        manga_ref: &str,
+        asset_id: Uuid,
+        storage_key: String,
+        request: CreateMangaCoverRequest,
+    ) -> Result<MangaCoverResponse, ApiError> {
+        let mut cover = self
+            .create_manual_cover(
+                manga_ref,
+                CreateMangaCoverRequest {
+                    storage_key: Some(storage_key),
+                    source_url: None,
+                    ..request
+                },
+            )
+            .await?;
+        sqlx::query("UPDATE manga_covers SET asset_id = $1 WHERE id = $2")
+            .bind(asset_id)
+            .bind(cover.id)
+            .execute(&self.pool)
+            .await?;
+        cover.asset_status = Some("ready".to_string());
+        Ok(cover)
+    }
+
     pub async fn create_manual_volume(
         &self,
         manga_ref: &str,
@@ -203,7 +234,8 @@ where
                 manga_id, file_name, source_url, volume, volume_key, locale, is_special_edition
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, mangadex_cover_id, file_name, source_url, volume, volume_key,
+            RETURNING id, mangadex_cover_id, file_name, source_url, storage_key,
+                      NULL::text AS asset_status, NULL::text AS image_url, NULL::text AS thumbnail_storage_key, NULL::text AS thumbnail_url, volume, volume_key,
                       locale, is_special_edition, source_created_at, source_updated_at, updated_at
             "#,
         )
@@ -217,6 +249,38 @@ where
         .fetch_one(&self.pool)
         .await
         .map_err(map_unique_violation)
+    }
+
+    pub async fn create_uploaded_volume(
+        &self,
+        manga_ref: &str,
+        asset_id: Uuid,
+        storage_key: String,
+        file_name: String,
+        volume: Option<String>,
+        locale: Option<String>,
+    ) -> Result<MangaVolumeResponse, ApiError> {
+        let manga = load_manga_response(&self.pool, manga_ref, None)
+            .await?
+            .ok_or(ApiError::MangaNotFound)?;
+        let file_name = required_text(file_name, "fileName")?;
+        validate_file_name(&file_name)?;
+        let volume = optional_text(volume);
+        if let Some(volume) = &volume {
+            validate_text(volume, "volume", 32)?;
+        }
+        let locale = locale
+            .map(|value| required_text(value, "locale"))
+            .transpose()?
+            .map(|value| normalize_language_value(&value))
+            .unwrap_or_else(|| "und".to_string());
+        validate_language(&locale, "locale")?;
+        let volume_key = volume.as_deref().and_then(normalized_volume_key);
+        let is_special_edition =
+            volume_key.is_none() || is_fractional_volume_key(volume_key.as_deref());
+        sqlx::query_as::<_, MangaVolumeResponse>(
+            "INSERT INTO manga_volumes (manga_id, file_name, storage_key, asset_id, volume, volume_key, locale, is_special_edition) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, mangadex_cover_id, file_name, source_url, storage_key, 'ready'::text AS asset_status, NULL::text AS image_url, NULL::text AS thumbnail_storage_key, NULL::text AS thumbnail_url, volume, volume_key, locale, is_special_edition, source_created_at, source_updated_at, updated_at",
+        ).bind(manga.id).bind(file_name).bind(storage_key).bind(asset_id).bind(volume).bind(volume_key).bind(locale).bind(is_special_edition).fetch_one(&self.pool).await.map_err(map_unique_violation)
     }
 
     pub async fn update_manga(
@@ -354,7 +418,8 @@ where
             SET file_name = $1, source_url = $2, volume = $3, volume_key = $4,
                 locale = $5, is_special_edition = $6
             WHERE id = $7 AND manga_id = $8 AND deleted_at IS NULL
-            RETURNING id, mangadex_cover_id, file_name, source_url, volume, volume_key,
+            RETURNING id, mangadex_cover_id, file_name, source_url, storage_key,
+                      NULL::text AS asset_status, NULL::text AS image_url, NULL::text AS thumbnail_storage_key, NULL::text AS thumbnail_url, volume, volume_key,
                       locale, is_special_edition, source_created_at, source_updated_at, updated_at
             "#,
         )
@@ -943,7 +1008,8 @@ async fn insert_manual_cover(
             manga_id, file_name, source_url, storage_key, locale, volume, is_primary
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, mangadex_cover_id, file_name, source_url, storage_key, locale, volume,
+        RETURNING id, mangadex_cover_id, file_name, source_url, storage_key,
+                  NULL::text AS asset_status, NULL::text AS image_url, NULL::text AS thumbnail_storage_key, NULL::text AS thumbnail_url, locale, volume,
                   is_primary, source_updated_at, updated_at
         "#,
     )
@@ -1253,11 +1319,14 @@ async fn list_volumes(
     };
     sqlx::query_as::<_, MangaVolumeResponse>(
         r#"
-        SELECT id, mangadex_cover_id, file_name, source_url, volume, volume_key,
-               locale, is_special_edition, source_created_at, source_updated_at, updated_at
-        FROM manga_volumes
-        WHERE manga_id = $1
-          AND deleted_at IS NULL
+        SELECT mv.id, mv.mangadex_cover_id, mv.file_name, mv.source_url,
+               COALESCE(ca.storage_key, mv.storage_key) AS storage_key,
+               ca.status AS asset_status, NULL::text AS image_url, ca.thumbnail_storage_key, NULL::text AS thumbnail_url, mv.volume, mv.volume_key,
+               mv.locale, mv.is_special_edition, mv.source_created_at, mv.source_updated_at, mv.updated_at
+        FROM manga_volumes mv
+        LEFT JOIN cover_assets ca ON ca.id = mv.asset_id
+        WHERE mv.manga_id = $1
+          AND mv.deleted_at IS NULL
           AND (
               is_special_edition = true
               OR split_part(replace(lower(locale), '_', '-'), '-', 1) = $2
@@ -1266,7 +1335,7 @@ async fn list_volumes(
                   AND NOT EXISTS (
                       SELECT 1
                       FROM manga_volumes preferred
-                      WHERE preferred.manga_id = manga_volumes.manga_id
+                       WHERE preferred.manga_id = mv.manga_id
                         AND preferred.deleted_at IS NULL
                         AND preferred.is_special_edition = false
                         AND split_part(replace(lower(preferred.locale), '_', '-'), '-', 1) = $2
@@ -1332,6 +1401,7 @@ async fn upsert_volume(
     let is_special_edition =
         volume_key.is_none() || is_fractional_volume_key(volume_key.as_deref());
     let source_url = cover_url(mangadex_id, file_name);
+    let asset_id = enqueue_source_asset(tx, &source_url).await?;
 
     if let Some(volume_key) = &volume_key {
         let existing_id: Option<Uuid> = sqlx::query_scalar(
@@ -1354,6 +1424,7 @@ async fn upsert_volume(
                     mangadex_cover_id = $2,
                     file_name = $3,
                     source_url = $4,
+                    asset_id = $10,
                     volume = $5,
                     is_special_edition = $6,
                     mangadex_version = $7,
@@ -1373,6 +1444,7 @@ async fn upsert_volume(
             .bind(cover.attributes.version)
             .bind(cover.attributes.created_at)
             .bind(cover.attributes.updated_at)
+            .bind(asset_id)
             .execute(&mut **tx)
             .await?;
             return Ok(());
@@ -1382,13 +1454,14 @@ async fn upsert_volume(
     sqlx::query(
         r#"
         INSERT INTO manga_volumes (
-            manga_id, mangadex_cover_id, file_name, source_url, volume, volume_key,
+            manga_id, mangadex_cover_id, file_name, source_url, asset_id, volume, volume_key,
             locale, is_special_edition, mangadex_version, source_created_at, source_updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         ON CONFLICT (mangadex_cover_id) DO UPDATE SET
             file_name = EXCLUDED.file_name,
             source_url = EXCLUDED.source_url,
+            asset_id = EXCLUDED.asset_id,
             volume = EXCLUDED.volume,
             volume_key = EXCLUDED.volume_key,
             locale = EXCLUDED.locale,
@@ -1403,6 +1476,7 @@ async fn upsert_volume(
     .bind(cover.id)
     .bind(file_name)
     .bind(source_url)
+    .bind(asset_id)
     .bind(&cover.attributes.volume)
     .bind(&volume_key)
     .bind(locale)
@@ -1578,16 +1652,19 @@ async fn upsert_cover(
         .execute(&mut **tx)
         .await?;
 
+    let source_url = cover_url(manga.id, file_name);
+    let asset_id = enqueue_source_asset(tx, &source_url).await?;
     sqlx::query(
         r#"
         INSERT INTO manga_covers (
-            manga_id, mangadex_cover_id, file_name, source_url, locale, volume,
+            manga_id, mangadex_cover_id, file_name, source_url, asset_id, locale, volume,
             is_primary, mangadex_version, source_updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9)
         ON CONFLICT (mangadex_cover_id) DO UPDATE SET
             file_name = EXCLUDED.file_name,
             source_url = EXCLUDED.source_url,
+            asset_id = EXCLUDED.asset_id,
             locale = EXCLUDED.locale,
             volume = EXCLUDED.volume,
             is_primary = true,
@@ -1599,7 +1676,8 @@ async fn upsert_cover(
     .bind(manga_id)
     .bind(cover_id)
     .bind(file_name)
-    .bind(cover_url(manga.id, file_name))
+    .bind(source_url)
+    .bind(asset_id)
     .bind(&attributes.locale)
     .bind(&attributes.volume)
     .bind(attributes.version)

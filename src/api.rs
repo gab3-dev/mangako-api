@@ -11,6 +11,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::{self, AuthConfig},
+    cover_storage::CoverStorage,
     manga,
     manga_service::MangaService,
     mangadex::MangaDexClient,
@@ -22,10 +23,11 @@ use crate::{
 pub struct AppState {
     pub manga_service: MangaService,
     pub fallback_metrics: FallbackMetrics,
+    pub cover_storage: Option<CoverStorage>,
 }
 
 pub fn router(pool: PgPool) -> Router {
-    build_router(pool, None, OperationalConfig::default())
+    build_router(pool, None, OperationalConfig::default(), None)
 }
 
 pub fn router_with_api_tokens(pool: PgPool, read_token: String, write_token: String) -> Router {
@@ -36,6 +38,7 @@ pub fn router_with_api_tokens(pool: PgPool, read_token: String, write_token: Str
             write_token,
         }),
         OperationalConfig::default(),
+        None,
     )
 }
 
@@ -44,10 +47,24 @@ pub fn router_with_operations(
     auth: AuthConfig,
     operations: OperationalConfig,
 ) -> Router {
-    build_router(pool, Some(auth), operations)
+    build_router(pool, Some(auth), operations, None)
 }
 
-fn build_router(pool: PgPool, auth: Option<AuthConfig>, operations: OperationalConfig) -> Router {
+pub fn router_with_cover_storage(
+    pool: PgPool,
+    auth: AuthConfig,
+    operations: OperationalConfig,
+    cover_storage: CoverStorage,
+) -> Router {
+    build_router(pool, Some(auth), operations, Some(cover_storage))
+}
+
+fn build_router(
+    pool: PgPool,
+    auth: Option<AuthConfig>,
+    operations: OperationalConfig,
+    cover_storage: Option<CoverStorage>,
+) -> Router {
     let http = reqwest::Client::builder()
         .user_agent(concat!("mangako-api/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(5))
@@ -78,14 +95,28 @@ fn build_router(pool: PgPool, auth: Option<AuthConfig>, operations: OperationalC
             post(manga::create_manga_cover),
         )
         .route(
+            "/mangas/{manga_ref}/covers/upload",
+            post(manga::upload_manga_cover),
+        )
+        .route(
             "/mangas/{manga_ref}/volumes",
             post(manga::create_manga_volume),
+        )
+        .route(
+            "/mangas/{manga_ref}/volumes/upload",
+            post(manga::upload_manga_volume),
         )
         .route(
             "/mangas/{manga_ref}/volumes/{volume_id}",
             patch(manga::update_manga_volume).delete(manga::delete_manga_volume),
         )
-        .layer(DefaultBodyLimit::max(operations.max_json_body_bytes));
+        .layer(DefaultBodyLimit::max(
+            cover_storage
+                .as_ref()
+                .map_or(operations.max_json_body_bytes, |storage| {
+                    storage.max_bytes().max(operations.max_json_body_bytes)
+                }),
+        ));
 
     if let Some(cache) = operations.cache {
         let cache = ResponseCache::new(cache);
@@ -140,6 +171,7 @@ fn build_router(pool: PgPool, auth: Option<AuthConfig>, operations: OperationalC
         .with_state(AppState {
             manga_service,
             fallback_metrics,
+            cover_storage,
         })
 }
 

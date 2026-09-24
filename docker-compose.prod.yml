@@ -2,11 +2,12 @@ services:
   caddy-init:
     image: caddy:2.10.2-alpine
     restart: "no"
-    command: ["/bin/sh", "-c", "install -m 644 /source/authenticated-origin-pull-ca.pem /data/authenticated-origin-pull-ca.pem && chown -R 1000:1000 /data /config"]
+    command: ["/bin/sh", "-c", "install -m 644 /source/authenticated-origin-pull-ca.pem /data/authenticated-origin-pull-ca.pem && install -d -o 10001 -g 10001 -m 755 /covers && chown -R 1000:1000 /data /config"]
     volumes:
       - ./deploy/authenticated_origin_pull_ca.pem:/source/authenticated-origin-pull-ca.pem:ro
       - caddy-data:/data
       - caddy-config:/config
+      - cover-data:/covers
 
   caddy:
     image: caddy:2.10.2-alpine
@@ -20,6 +21,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+      - cover-data:/srv/covers:ro
     depends_on:
       caddy-init:
         condition: service_completed_successfully
@@ -62,6 +64,9 @@ services:
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
       CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-1000}
       CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-67108864}
+      COVER_STORAGE_DIR: /var/lib/mangako/covers
+      COVER_PUBLIC_BASE_URL: ${COVER_PUBLIC_BASE_URL:-https://mangako-api.kostudio.io/media}
+      MAX_COVER_UPLOAD_BYTES: ${MAX_COVER_UPLOAD_BYTES:-8388608}
       RUST_LOG: ${RUST_LOG:-mangako_api=info,tower_http=info}
     expose:
       - "3000"
@@ -77,6 +82,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
+    volumes:
+      - cover-data:/var/lib/mangako/covers
     cap_drop:
       - ALL
     security_opt:
@@ -119,6 +126,7 @@ volumes:
   caddy-data:
   caddy-config:
   postgres-data:
+  cover-data:
 
 networks:
   edge:

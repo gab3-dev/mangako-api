@@ -15,6 +15,9 @@ services:
       CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-60}
       CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-1000}
       CACHE_MAX_BYTES: ${CACHE_MAX_BYTES:-67108864}
+      COVER_STORAGE_DIR: /var/lib/mangako/covers
+      COVER_PUBLIC_BASE_URL: ${COVER_PUBLIC_BASE_URL:-http://localhost:3000/media}
+      MAX_COVER_UPLOAD_BYTES: ${MAX_COVER_UPLOAD_BYTES:-8388608}
       RUST_LOG: ${RUST_LOG:-mangako_api=info,tower_http=info}
     ports:
       - "3000:3000"

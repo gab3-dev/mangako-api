@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::{
     Json,
-    extract::{Extension, State},
+    extract::{Extension, Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     api::AppState,
+    cover_storage::record_upload,
+    cover_storage::{CoverStorage, ready_image_url},
     error::{ApiError, ErrorResponse},
     operations::{CacheTtl, FallbackRequest, FallbackStatsResponse},
 };
@@ -21,6 +23,38 @@ use crate::{
 const MAX_PAGE_SIZE: u32 = 100;
 const MAX_OFFSET: u32 = 10_000;
 const POPULAR_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn decorate_manga(manga: &mut MangaResponse, storage: Option<&CoverStorage>) {
+    for cover in &mut manga.covers {
+        decorate_cover(cover, storage);
+    }
+}
+
+fn decorate_cover(cover: &mut MangaCoverResponse, storage: Option<&CoverStorage>) {
+    cover.image_url = ready_image_url(
+        storage,
+        cover.storage_key.as_deref(),
+        cover.asset_status.as_deref(),
+    );
+    cover.thumbnail_url = ready_image_url(
+        storage,
+        cover.thumbnail_storage_key.as_deref(),
+        cover.asset_status.as_deref(),
+    );
+}
+
+fn decorate_volume(volume: &mut MangaVolumeResponse, storage: Option<&CoverStorage>) {
+    volume.image_url = ready_image_url(
+        storage,
+        volume.storage_key.as_deref(),
+        volume.asset_status.as_deref(),
+    );
+    volume.thumbnail_url = ready_image_url(
+        storage,
+        volume.thumbnail_storage_key.as_deref(),
+        volume.asset_status.as_deref(),
+    );
+}
 
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +87,8 @@ pub struct MangaCreatorResponse {
     pub mangadex_id: Uuid,
     pub name: String,
     pub image_url: Option<String>,
+    pub thumbnail_storage_key: Option<String>,
+    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Serialize, FromRow, ToSchema)]
@@ -79,6 +115,10 @@ pub struct MangaCoverResponse {
     pub file_name: Option<String>,
     pub source_url: Option<String>,
     pub storage_key: Option<String>,
+    pub asset_status: Option<String>,
+    pub image_url: Option<String>,
+    pub thumbnail_storage_key: Option<String>,
+    pub thumbnail_url: Option<String>,
     pub locale: Option<String>,
     pub volume: Option<String>,
     pub is_primary: bool,
@@ -92,7 +132,12 @@ pub struct MangaVolumeResponse {
     pub id: Uuid,
     pub mangadex_cover_id: Option<Uuid>,
     pub file_name: String,
-    pub source_url: String,
+    pub source_url: Option<String>,
+    pub storage_key: Option<String>,
+    pub asset_status: Option<String>,
+    pub image_url: Option<String>,
+    pub thumbnail_storage_key: Option<String>,
+    pub thumbnail_url: Option<String>,
     pub volume: Option<String>,
     pub volume_key: Option<String>,
     pub locale: String,
@@ -287,10 +332,13 @@ pub async fn search_mangas(
         });
     }
     let locale = normalize_locale(query.locale.as_deref());
-    let mangas = state
+    let mut mangas = state
         .manga_service
         .search_mangas_for_request(title, limit, offset, locale.as_deref(), &fallback)
         .await?;
+    for manga in &mut mangas {
+        decorate_manga(manga, state.cover_storage.as_ref());
+    }
     let mut response = Json(mangas).into_response();
     if title.is_none() {
         response
@@ -316,11 +364,9 @@ pub async fn create_manga(
     State(state): State<AppState>,
     Json(request): Json<CreateMangaRequest>,
 ) -> Result<(StatusCode, Json<MangaResponse>), ApiError> {
-    state
-        .manga_service
-        .create_manual_manga(request)
-        .await
-        .map(|manga| (StatusCode::CREATED, Json(manga)))
+    let mut manga = state.manga_service.create_manual_manga(request).await?;
+    decorate_manga(&mut manga, state.cover_storage.as_ref());
+    Ok((StatusCode::CREATED, Json(manga)))
 }
 
 #[utoipa::path(
@@ -342,11 +388,12 @@ pub async fn update_manga(
     Json(request): Json<UpdateMangaRequest>,
 ) -> Result<Json<MangaResponse>, ApiError> {
     validate_manga_ref(&manga_ref)?;
-    state
+    let mut manga = state
         .manga_service
         .update_manga(&manga_ref, request)
-        .await
-        .map(Json)
+        .await?;
+    decorate_manga(&mut manga, state.cover_storage.as_ref());
+    Ok(Json(manga))
 }
 
 #[utoipa::path(
@@ -390,7 +437,7 @@ pub async fn get_manga(
 ) -> Result<Json<MangaResponse>, ApiError> {
     validate_manga_ref(&manga_ref)?;
     let locale = normalize_locale(query.locale.as_deref());
-    state
+    let mut manga = state
         .manga_service
         .get_manga_for_request(
             &manga_ref,
@@ -398,8 +445,9 @@ pub async fn get_manga(
             locale.as_deref(),
             &fallback,
         )
-        .await
-        .map(Json)
+        .await?;
+    decorate_manga(&mut manga, state.cover_storage.as_ref());
+    Ok(Json(manga))
 }
 
 #[utoipa::path(
@@ -425,7 +473,7 @@ pub async fn get_manga_volumes(
     validate_manga_ref(&manga_ref)?;
     let (limit, offset) = pagination(query.limit, query.offset, 50)?;
     let locale = normalize_locale(query.locale.as_deref());
-    state
+    let mut volumes = state
         .manga_service
         .get_manga_volumes_for_request(
             &manga_ref,
@@ -435,8 +483,11 @@ pub async fn get_manga_volumes(
             locale.as_deref(),
             &fallback,
         )
-        .await
-        .map(Json)
+        .await?;
+    for volume in &mut volumes {
+        decorate_volume(volume, state.cover_storage.as_ref());
+    }
+    Ok(Json(volumes))
 }
 
 #[utoipa::path(
@@ -458,11 +509,12 @@ pub async fn create_manga_cover(
     Json(request): Json<CreateMangaCoverRequest>,
 ) -> Result<(StatusCode, Json<MangaCoverResponse>), ApiError> {
     validate_manga_ref(&manga_ref)?;
-    state
+    let mut cover = state
         .manga_service
         .create_manual_cover(&manga_ref, request)
-        .await
-        .map(|cover| (StatusCode::CREATED, Json(cover)))
+        .await?;
+    decorate_cover(&mut cover, state.cover_storage.as_ref());
+    Ok((StatusCode::CREATED, Json(cover)))
 }
 
 #[utoipa::path(
@@ -485,11 +537,162 @@ pub async fn create_manga_volume(
     Json(request): Json<CreateMangaVolumeRequest>,
 ) -> Result<(StatusCode, Json<MangaVolumeResponse>), ApiError> {
     validate_manga_ref(&manga_ref)?;
-    state
+    let mut volume = state
         .manga_service
         .create_manual_volume(&manga_ref, request)
+        .await?;
+    decorate_volume(&mut volume, state.cover_storage.as_ref());
+    Ok((StatusCode::CREATED, Json(volume)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/mangas/{manga_ref}/covers/upload",
+    security(("write_token" = [])),
+    params(("manga_ref" = String, Path)),
+    responses((status = 201, description = "Cover file uploaded", body = MangaCoverResponse), (status = 400, description = "Invalid multipart image", body = ErrorResponse))
+)]
+pub async fn upload_manga_cover(
+    State(state): State<AppState>,
+    axum::extract::Path(manga_ref): axum::extract::Path<String>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<MangaCoverResponse>), ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    let storage = state
+        .cover_storage
+        .as_ref()
+        .ok_or(ApiError::CoverStorageUnavailable)?;
+    let upload = read_upload(multipart).await?;
+    let image = storage.store_upload(&upload.bytes).await?;
+    let asset_id = record_upload(&state.manga_service.pool_for_assets(), &image).await?;
+    let mut cover = state
+        .manga_service
+        .create_uploaded_cover(
+            &manga_ref,
+            asset_id,
+            image.storage_key.clone(),
+            CreateMangaCoverRequest {
+                file_name: upload.file_name,
+                source_url: None,
+                storage_key: None,
+                locale: upload.locale,
+                volume: upload.volume,
+                is_primary: upload.is_primary,
+            },
+        )
+        .await?;
+    cover.thumbnail_storage_key = Some(image.thumbnail_storage_key.clone());
+    decorate_cover(&mut cover, Some(storage));
+    Ok((StatusCode::CREATED, Json(cover)))
+}
+
+#[utoipa::path(
+    post,
+    path = "/mangas/{manga_ref}/volumes/upload",
+    security(("write_token" = [])),
+    params(("manga_ref" = String, Path)),
+    responses((status = 201, description = "Volume cover file uploaded", body = MangaVolumeResponse), (status = 400, description = "Invalid multipart image", body = ErrorResponse))
+)]
+pub async fn upload_manga_volume(
+    State(state): State<AppState>,
+    axum::extract::Path(manga_ref): axum::extract::Path<String>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<MangaVolumeResponse>), ApiError> {
+    validate_manga_ref(&manga_ref)?;
+    let storage = state
+        .cover_storage
+        .as_ref()
+        .ok_or(ApiError::CoverStorageUnavailable)?;
+    let upload = read_upload(multipart).await?;
+    let image = storage.store_upload(&upload.bytes).await?;
+    let asset_id = record_upload(&state.manga_service.pool_for_assets(), &image).await?;
+    let file_name = upload.file_name.ok_or(ApiError::BadRequest {
+        message: "fileName is required".to_string(),
+    })?;
+    let mut volume = state
+        .manga_service
+        .create_uploaded_volume(
+            &manga_ref,
+            asset_id,
+            image.storage_key.clone(),
+            file_name,
+            upload.volume,
+            upload.locale,
+        )
+        .await?;
+    volume.thumbnail_storage_key = Some(image.thumbnail_storage_key.clone());
+    decorate_volume(&mut volume, Some(storage));
+    Ok((StatusCode::CREATED, Json(volume)))
+}
+
+struct Upload {
+    bytes: Vec<u8>,
+    file_name: Option<String>,
+    locale: Option<String>,
+    volume: Option<String>,
+    is_primary: bool,
+}
+
+async fn read_upload(mut multipart: Multipart) -> Result<Upload, ApiError> {
+    let mut bytes = None;
+    let mut file_name = None;
+    let mut locale = None;
+    let mut volume = None;
+    let mut is_primary = false;
+    while let Some(field) = multipart
+        .next_field()
         .await
-        .map(|volume| (StatusCode::CREATED, Json(volume)))
+        .map_err(|_| ApiError::BadRequest {
+            message: "invalid multipart upload".to_string(),
+        })?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "file" {
+            if bytes.is_some() {
+                return Err(ApiError::BadRequest {
+                    message: "exactly one cover file is required".to_string(),
+                });
+            }
+            file_name = field.file_name().map(ToOwned::to_owned);
+            bytes = Some(
+                field
+                    .bytes()
+                    .await
+                    .map_err(|_| ApiError::BadRequest {
+                        message: "invalid cover file".to_string(),
+                    })?
+                    .to_vec(),
+            );
+        } else {
+            let value = field.text().await.map_err(|_| ApiError::BadRequest {
+                message: "invalid multipart field".to_string(),
+            })?;
+            match name.as_str() {
+                "fileName" => file_name = Some(value),
+                "locale" => locale = Some(value),
+                "volume" => volume = Some(value),
+                "isPrimary" => {
+                    is_primary = value.parse().map_err(|_| ApiError::BadRequest {
+                        message: "isPrimary must be true or false".to_string(),
+                    })?
+                }
+                _ => {
+                    return Err(ApiError::BadRequest {
+                        message: "unknown multipart field".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(Upload {
+        bytes: bytes.ok_or(ApiError::BadRequest {
+            message: "cover file is required".to_string(),
+        })?,
+        file_name,
+        locale,
+        volume,
+        is_primary,
+    })
 }
 
 #[utoipa::path(
@@ -514,11 +717,12 @@ pub async fn update_manga_volume(
     Json(request): Json<UpdateMangaVolumeRequest>,
 ) -> Result<Json<MangaVolumeResponse>, ApiError> {
     validate_manga_ref(&manga_ref)?;
-    state
+    let mut volume = state
         .manga_service
         .update_manga_volume(&manga_ref, volume_id, request)
-        .await
-        .map(Json)
+        .await?;
+    decorate_volume(&mut volume, state.cover_storage.as_ref());
+    Ok(Json(volume))
 }
 
 #[utoipa::path(
@@ -673,10 +877,14 @@ async fn list_covers(
 ) -> Result<Vec<MangaCoverResponse>, sqlx::Error> {
     sqlx::query_as::<_, MangaCoverResponse>(
         r#"
-        SELECT id, mangadex_cover_id, file_name, source_url, storage_key,
-               locale, volume, is_primary, source_updated_at, updated_at
-        FROM manga_covers
-        WHERE manga_id = $1 AND deleted_at IS NULL
+        SELECT mc.id, mc.mangadex_cover_id, mc.file_name, mc.source_url,
+               COALESCE(ca.storage_key, mc.storage_key) AS storage_key,
+               ca.status AS asset_status, NULL::text AS image_url,
+               ca.thumbnail_storage_key, NULL::text AS thumbnail_url,
+               mc.locale, mc.volume, mc.is_primary, mc.source_updated_at, mc.updated_at
+        FROM manga_covers mc
+        LEFT JOIN cover_assets ca ON ca.id = mc.asset_id
+        WHERE mc.manga_id = $1 AND mc.deleted_at IS NULL
         ORDER BY is_primary DESC, volume ASC NULLS LAST, updated_at DESC
         "#,
     )

@@ -16,6 +16,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && groupadd --system --gid 10001 mangako \
     && useradd --system --uid 10001 --gid mangako --home-dir /nonexistent --shell /usr/sbin/nologin mangako \
+    && install -d -o mangako -g mangako -m 755 /var/lib/mangako/covers \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder --chown=mangako:mangako /app/target/release/mangako-api /usr/local/bin/mangako-api

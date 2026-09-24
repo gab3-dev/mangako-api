@@ -32,6 +32,8 @@ pub enum ApiError {
     MangaNotFound,
     #[error("volume not found")]
     VolumeNotFound,
+    #[error("cover storage is unavailable")]
+    CoverStorageUnavailable,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -49,6 +51,9 @@ impl IntoResponse for ApiError {
             Self::TooManyRequests => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             Self::MangaNotFound => (StatusCode::NOT_FOUND, "manga_not_found"),
             Self::VolumeNotFound => (StatusCode::NOT_FOUND, "volume_not_found"),
+            Self::CoverStorageUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "cover_storage_unavailable")
+            }
             Self::MissingEnv { .. } | Self::InvalidEnv { .. } | Self::InvalidAddr(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "configuration_error")
             }
