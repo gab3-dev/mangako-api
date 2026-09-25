@@ -2,6 +2,11 @@
 
 Rust API for the MangaKo app.
 
+[![Tests](https://github.com/gab3-dev/mangako-api/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/gab3-dev/mangako-api/actions/workflows/ci.yml)
+[![Release image](https://github.com/gab3-dev/mangako-api/actions/workflows/docker.yml/badge.svg?branch=master)](https://github.com/gab3-dev/mangako-api/actions/workflows/docker.yml)
+
+The API provides a local catalog with MangaDex search and refresh fallback, manual catalog management, and locally mirrored cover assets.
+
 ## Database
 
 Start PostgreSQL:
@@ -38,7 +43,7 @@ When running through Docker Compose, it is exposed on `localhost:3000`.
 
 ## Authentication
 
-Read routes require `API_READ_TOKEN`. Catalog creation routes require the separate server-only `API_WRITE_TOKEN`; do not distribute it to the Android app.
+Read routes require `API_READ_TOKEN`. Catalog mutations, uploads, and `refresh=true` require the separate server-only `API_WRITE_TOKEN`; do not distribute it to the Android app.
 
 Send it as a Bearer token:
 
@@ -80,6 +85,25 @@ Every response receives an `X-Request-Id`, and request logs include request ID, 
 
 CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64-deployment.md` for GHCR deployment, cache sizing, and PostgreSQL migration instructions.
 
+## Cover Storage
+
+Production stores cover files in a persistent Docker volume and serves them publicly through Caddy at `/media/*`. The API never proxies image bytes.
+
+- MangaDex covers are queued for asynchronous mirroring after catalog synchronization. Existing MangaDex records are queued at startup as an incremental backfill.
+- Each stored cover has an original asset and a JPEG thumbnail with a maximum width of 512 pixels. Thumbnail keys use the MangaDex-style `.512.jpg` suffix.
+- JSON responses preserve `sourceUrl` as provenance and fallback. `imageUrl` and `thumbnailUrl` are populated when the local asset is ready; `assetStatus` reports `pending`, `ready`, or `failed`.
+- Manual multipart uploads accept JPEG, PNG, and WebP. Files are size-limited, decoded for validation, hashed with SHA-256, and written using immutable keys.
+
+Production defaults:
+
+```env
+COVER_STORAGE_DIR=/var/lib/mangako/covers
+COVER_PUBLIC_BASE_URL=https://mangako-api.kostudio.io/media
+MAX_COVER_UPLOAD_BYTES=8388608
+```
+
+Back up the `cover-data` Docker volume together with PostgreSQL. Removing that volume removes locally mirrored images but does not remove their MangaDex source URLs.
+
 ## Endpoints
 
 - `GET /docs`: Swagger UI.
@@ -87,8 +111,12 @@ CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64
 - `GET /health`: returns `ok`.
 - `GET /stats/mangadex-fallback`: requires API token. Returns MangaDex fallback statistics since process start.
 - `POST /mangas`: requires API token. Creates a local-only manga, including metadata, localizations, aliases, and general covers. Local-only manga are never refreshed from MangaDex and are returned by title search before MangaDex is queried.
+- `PATCH /mangas/{id_or_slug}` and `DELETE /mangas/{id_or_slug}`: require the write token. Update catalog metadata partially or soft-delete a manga.
 - `POST /mangas/{id_or_slug}/covers`: requires API token. Adds a general cover by external `sourceUrl` or internal `storageKey`; setting `isPrimary` replaces the current primary cover.
+- `POST /mangas/{id_or_slug}/covers/upload`: requires the write token. Accepts a `multipart/form-data` `file` plus optional `fileName`, `locale`, `volume`, and `isPrimary` fields.
 - `POST /mangas/{id_or_slug}/volumes`: requires API token. Adds a local volume cover by external `sourceUrl`. Numbered volumes are unique per normalized number and locale; fractional and unnumbered entries are special editions.
+- `POST /mangas/{id_or_slug}/volumes/upload`: requires the write token. Accepts a `multipart/form-data` `file`, required `fileName`, and optional `locale` and `volume` fields.
+- `PATCH /mangas/{id_or_slug}/volumes/{volume_id}` and `DELETE /mangas/{id_or_slug}/volumes/{volume_id}`: require the write token. Update or soft-delete a volume cover.
 - `GET /mangas?title={title}&limit=10&offset=0&locale={locale}`: requires API token. Matching local-only manga are returned first; otherwise MangaDex defines search ordering and pagination, and its results are persisted locally. If MangaDex fails, the API returns a paginated local fallback. `locale` calculates `latestVolumeNumber` from that cover language; regional values are matched by base language (`pt` matches `pt-br`) and `original` selects the manga's original language. `/mangas/` with a trailing slash is also accepted.
 - `GET /mangas?limit=10&offset=0`: requires API token. Returns MangaDex titles ordered by followed count. Successful pages are cached for 6 hours.
 - `GET /mangas/{id_or_slug}?refresh=false&locale={locale}`: requires the read token. Returns one manga by internal UUID, MangaDex UUID, or slug. Records older than one day are refreshed from MangaDex; `refresh=true` forces the attempt and requires the write token. Stale local data is served if MangaDex is unavailable. `locale` calculates `latestVolumeNumber` from that cover language, falling back to the original language when needed.
@@ -101,10 +129,11 @@ CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64
 - `mangas`: canonical manga records, optionally linked to MangaDex via `mangadex_id`.
 - `manga_localizations`: one localized title and/or description per normalized language, for example `en`, `pt-br`, `ja`, and `ko`.
 - `manga_aliases`: alternate titles per language for search and MangaDex ingestion.
-- `manga_covers`: cover/image metadata, with either external `source_url` or future internal `storage_key`.
+- `manga_covers`: general cover metadata, source URLs, and optional local cover assets.
 - `creators` and `manga_creators`: MangaDex authors/artists and their manga roles.
 - `manga_volumes`: MangaDex or local cover records used as volume images, deduplicated by `(manga_id, volume_key, locale)` for numbered volumes.
 - `manga_source_syncs`: source refresh bookkeeping for incremental sync from MangaDex.
+- `cover_assets`: local original and thumbnail files, integrity metadata, mirroring state, and retry bookkeeping.
 
 User library, progress, and ownership data are intentionally not modeled in this API yet.
 
