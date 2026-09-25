@@ -87,8 +87,6 @@ pub struct MangaCreatorResponse {
     pub mangadex_id: Uuid,
     pub name: String,
     pub image_url: Option<String>,
-    pub thumbnail_storage_key: Option<String>,
-    pub thumbnail_url: Option<String>,
 }
 
 #[derive(Serialize, FromRow, ToSchema)]
