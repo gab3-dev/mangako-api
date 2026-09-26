@@ -54,13 +54,17 @@ jobs:
           API_READ_TOKEN: arm64-smoke-read-token-0123456789
           API_WRITE_TOKEN: arm64-smoke-write-token-012345678
         run: docker compose up -d --build --wait
-      - name: Verify health, OpenAPI, and authenticated routing
+      - name: Verify health, OpenAPI, authenticated routing, and CRUD E2E
+        env:
+          API_READ_TOKEN: arm64-smoke-read-token-0123456789
+          API_WRITE_TOKEN: arm64-smoke-write-token-012345678
         run: |
           curl --fail --silent --show-error http://localhost:3000/health
           curl --fail --silent --show-error http://localhost:3000/api-docs/openapi.json >/dev/null
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             --header 'Authorization: Bearer arm64-smoke-read-token-0123456789' \
             'http://localhost:3000/mangas?limit=0')" = "400"
+          bash tests/e2e_crud.sh
       - name: Show service logs
         if: always()
         env:

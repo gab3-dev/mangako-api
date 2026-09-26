@@ -243,7 +243,7 @@ async fn manual_manga_can_include_metadata_covers_and_volumes() {
     let missing_manga = app
         .oneshot(
             Request::builder()
-                .uri(format!("/mangas/{manga_id}"))
+                .uri("/mangas/manual-catalog-test")
                 .header(header::AUTHORIZATION, "Bearer manual-read-token")
                 .body(Body::empty())
                 .unwrap(),

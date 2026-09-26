@@ -186,6 +186,31 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
     .fetch_one(&pool)
     .await
     .unwrap();
+    sqlx::query("DELETE FROM creators WHERE mangadex_id IN ('a4010401-0401-0401-0401-040104010401', 'b4010401-0401-0401-0401-040104010401')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let author_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO creators (mangadex_id, name) VALUES ('a4010401-0401-0401-0401-040104010401', 'Test Author') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let artist_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO creators (mangadex_id, name) VALUES ('b4010401-0401-0401-0401-040104010401', 'Test Artist') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (creator_id, role) in [(author_id, "author"), (artist_id, "artist")] {
+        sqlx::query("INSERT INTO manga_creators (manga_id, creator_id, role) VALUES ($1, $2, $3)")
+            .bind(manga_id)
+            .bind(creator_id)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     sqlx::query(
         r#"
         INSERT INTO manga_volumes (
@@ -328,6 +353,8 @@ async fn volumes_can_be_loaded_by_mangadex_id() {
         .unwrap();
     let manga: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
     assert_eq!(manga["latestVolumeNumber"], "3");
+    assert_eq!(manga["authors"][0]["name"], "Test Author");
+    assert_eq!(manga["artists"][0]["name"], "Test Artist");
 
     let portuguese_detail = app
         .clone()
