@@ -1,9 +1,15 @@
-use std::collections::HashMap;
-use std::future::Future;
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tokio::{
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    time::{Instant, sleep_until},
+};
 use uuid::Uuid;
+
+const MANGADEX_MAX_CONCURRENT_REQUESTS: usize = 1;
+const MANGADEX_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
 pub trait MangaDexApi: Clone + Send + Sync + 'static {
     fn get_manga(
@@ -33,9 +39,46 @@ pub trait MangaDexApi: Clone + Send + Sync + 'static {
 }
 
 #[derive(Clone)]
+struct MangaDexRequestLimiter {
+    permits: Arc<Semaphore>,
+    next_request_at: Arc<Mutex<Instant>>,
+    min_interval: Duration,
+}
+
+impl MangaDexRequestLimiter {
+    fn new(max_concurrent_requests: usize, min_interval: Duration) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(max_concurrent_requests)),
+            next_request_at: Arc::new(Mutex::new(Instant::now())),
+            min_interval,
+        }
+    }
+
+    async fn acquire(&self) -> OwnedSemaphorePermit {
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("MangaDex request limiter semaphore is never closed");
+        let mut next_request_at = self.next_request_at.lock().await;
+        let now = Instant::now();
+        let scheduled_at = (*next_request_at).max(now);
+        *next_request_at = scheduled_at + self.min_interval;
+        drop(next_request_at);
+
+        if scheduled_at > now {
+            sleep_until(scheduled_at).await;
+        }
+        permit
+    }
+}
+
+#[derive(Clone)]
 pub struct MangaDexClient {
     http: reqwest::Client,
     base_url: String,
+    limiter: MangaDexRequestLimiter,
 }
 
 impl MangaDexClient {
@@ -43,21 +86,34 @@ impl MangaDexClient {
         Self {
             http,
             base_url: "https://api.mangadex.org".to_string(),
+            limiter: MangaDexRequestLimiter::new(
+                MANGADEX_MAX_CONCURRENT_REQUESTS,
+                MANGADEX_MIN_REQUEST_INTERVAL,
+            ),
         }
+    }
+
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let _permit = self.limiter.acquire().await;
+        request.send().await
     }
 }
 
 impl MangaDexApi for MangaDexClient {
     async fn get_manga(&self, id: Uuid) -> Result<Option<MangaDexManga>, reqwest::Error> {
         let response = self
-            .http
-            .get(format!("{}/manga/{id}", self.base_url))
-            .query(&[
-                ("includes[]", "cover_art"),
-                ("includes[]", "author"),
-                ("includes[]", "artist"),
-            ])
-            .send()
+            .send(
+                self.http
+                    .get(format!("{}/manga/{id}", self.base_url))
+                    .query(&[
+                        ("includes[]", "cover_art"),
+                        ("includes[]", "author"),
+                        ("includes[]", "artist"),
+                    ]),
+            )
             .await?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -82,10 +138,11 @@ impl MangaDexApi for MangaDexClient {
         let query = manga_search_query(title, offset, limit);
 
         let response = self
-            .http
-            .get(format!("{}/manga", self.base_url))
-            .query(&query)
-            .send()
+            .send(
+                self.http
+                    .get(format!("{}/manga", self.base_url))
+                    .query(&query),
+            )
             .await?;
 
         let body = response
@@ -102,15 +159,12 @@ impl MangaDexApi for MangaDexClient {
         limit: u32,
     ) -> Result<Vec<MangaDexCover>, reqwest::Error> {
         let response = self
-            .http
-            .get(format!("{}/cover", self.base_url))
-            .query(&[
+            .send(self.http.get(format!("{}/cover", self.base_url)).query(&[
                 ("limit", limit.to_string()),
                 ("offset", offset.to_string()),
                 ("manga[]", manga_id.to_string()),
                 ("order[volume]", "asc".to_string()),
-            ])
-            .send()
+            ]))
             .await?;
 
         Ok(response
@@ -126,10 +180,11 @@ impl MangaDexApi for MangaDexClient {
         language: &str,
     ) -> Result<Option<String>, reqwest::Error> {
         let response = self
-            .http
-            .get(format!("{}/cover", self.base_url))
-            .query(&latest_volume_query(manga_id))
-            .send()
+            .send(
+                self.http
+                    .get(format!("{}/cover", self.base_url))
+                    .query(&latest_volume_query(manga_id)),
+            )
             .await?;
 
         Ok(response
@@ -289,6 +344,37 @@ mod tests {
         assert!(query.contains(&("offset", "12".to_string())));
         assert!(query.contains(&("limit", "6".to_string())));
         assert!(!query.iter().any(|(key, _)| *key == "order[followedCount]"));
+    }
+
+    #[tokio::test]
+    async fn request_limiter_spaces_requests_across_clones() {
+        let limiter = MangaDexRequestLimiter::new(2, Duration::from_millis(40));
+        let _first = limiter.acquire().await;
+
+        let started_at = Instant::now();
+        let _second = limiter.clone().acquire().await;
+
+        assert!(started_at.elapsed() >= Duration::from_millis(35));
+    }
+
+    #[tokio::test]
+    async fn request_limiter_caps_concurrent_requests() {
+        let limiter = MangaDexRequestLimiter::new(1, Duration::ZERO);
+        let first = limiter.acquire().await;
+        let cloned = limiter.clone();
+        let mut second = tokio::spawn(async move { cloned.acquire().await });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second)
+                .await
+                .is_err()
+        );
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), second)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
