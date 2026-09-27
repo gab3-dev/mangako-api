@@ -12,32 +12,92 @@ use crate::operations::RequestMetrics;
 
 const MANGADEX_MAX_CONCURRENT_REQUESTS: usize = 1;
 const MANGADEX_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
+const MANGADEX_FAILURE_THRESHOLD: u32 = 3;
+const MANGADEX_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Debug, thiserror::Error)]
+pub enum MangaDexError {
+    #[error("MangaDex circuit breaker is open")]
+    CircuitOpen,
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+}
 
 pub trait MangaDexApi: Clone + Send + Sync + 'static {
     fn get_manga(
         &self,
         id: Uuid,
-    ) -> impl Future<Output = Result<Option<MangaDexManga>, reqwest::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<MangaDexManga>, MangaDexError>> + Send;
 
     fn search_mangas(
         &self,
         title: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> impl Future<Output = Result<Vec<MangaDexManga>, reqwest::Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<MangaDexManga>, MangaDexError>> + Send;
 
     fn list_covers(
         &self,
         manga_id: Uuid,
         offset: u32,
         limit: u32,
-    ) -> impl Future<Output = Result<Vec<MangaDexCover>, reqwest::Error>> + Send;
+    ) -> impl Future<Output = Result<Vec<MangaDexCover>, MangaDexError>> + Send;
 
     fn latest_volume_number(
         &self,
         manga_id: Uuid,
         language: &str,
-    ) -> impl Future<Output = Result<Option<String>, reqwest::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<String>, MangaDexError>> + Send;
+}
+
+#[derive(Clone)]
+struct MangaDexCircuitBreaker {
+    state: Arc<Mutex<MangaDexCircuitState>>,
+    failure_threshold: u32,
+    cooldown: Duration,
+}
+
+struct MangaDexCircuitState {
+    consecutive_failures: u32,
+    open_until: Option<Instant>,
+}
+
+impl MangaDexCircuitBreaker {
+    fn new(failure_threshold: u32, cooldown: Duration) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(MangaDexCircuitState {
+                consecutive_failures: 0,
+                open_until: None,
+            })),
+            failure_threshold,
+            cooldown,
+        }
+    }
+
+    async fn allows_request(&self) -> bool {
+        let mut state = self.state.lock().await;
+        if let Some(open_until) = state.open_until {
+            if open_until > Instant::now() {
+                return false;
+            }
+            state.open_until = None;
+            state.consecutive_failures = 0;
+        }
+        true
+    }
+
+    async fn record_result(&self, success: bool) {
+        let mut state = self.state.lock().await;
+        if success {
+            state.consecutive_failures = 0;
+            state.open_until = None;
+            return;
+        }
+        state.consecutive_failures += 1;
+        if state.consecutive_failures >= self.failure_threshold {
+            state.open_until = Some(Instant::now() + self.cooldown);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -81,6 +141,7 @@ pub struct MangaDexClient {
     http: reqwest::Client,
     base_url: String,
     limiter: MangaDexRequestLimiter,
+    circuit_breaker: MangaDexCircuitBreaker,
     metrics: RequestMetrics,
 }
 
@@ -93,6 +154,10 @@ impl MangaDexClient {
                 MANGADEX_MAX_CONCURRENT_REQUESTS,
                 MANGADEX_MIN_REQUEST_INTERVAL,
             ),
+            circuit_breaker: MangaDexCircuitBreaker::new(
+                MANGADEX_FAILURE_THRESHOLD,
+                MANGADEX_CIRCUIT_COOLDOWN,
+            ),
             metrics,
         }
     }
@@ -100,8 +165,11 @@ impl MangaDexClient {
     async fn send(
         &self,
         request: reqwest::RequestBuilder,
-    ) -> Result<reqwest::Response, reqwest::Error> {
+    ) -> Result<reqwest::Response, MangaDexError> {
         let _permit = self.limiter.acquire().await;
+        if !self.circuit_breaker.allows_request().await {
+            return Err(MangaDexError::CircuitOpen);
+        }
         let response = request.send().await;
         let success = response
             .as_ref()
@@ -109,12 +177,13 @@ impl MangaDexClient {
         if let Err(error) = self.metrics.record_mangadex_result(success).await {
             tracing::warn!(%error, "failed to record MangaDex request metric");
         }
-        response
+        self.circuit_breaker.record_result(success).await;
+        response.map_err(MangaDexError::from)
     }
 }
 
 impl MangaDexApi for MangaDexClient {
-    async fn get_manga(&self, id: Uuid) -> Result<Option<MangaDexManga>, reqwest::Error> {
+    async fn get_manga(&self, id: Uuid) -> Result<Option<MangaDexManga>, MangaDexError> {
         let response = self
             .send(
                 self.http
@@ -145,7 +214,7 @@ impl MangaDexApi for MangaDexClient {
         title: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<MangaDexManga>, reqwest::Error> {
+    ) -> Result<Vec<MangaDexManga>, MangaDexError> {
         let query = manga_search_query(title, offset, limit);
 
         let response = self
@@ -168,7 +237,7 @@ impl MangaDexApi for MangaDexClient {
         manga_id: Uuid,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<MangaDexCover>, reqwest::Error> {
+    ) -> Result<Vec<MangaDexCover>, MangaDexError> {
         let response = self
             .send(self.http.get(format!("{}/cover", self.base_url)).query(&[
                 ("limit", limit.to_string()),
@@ -189,7 +258,7 @@ impl MangaDexApi for MangaDexClient {
         &self,
         manga_id: Uuid,
         language: &str,
-    ) -> Result<Option<String>, reqwest::Error> {
+    ) -> Result<Option<String>, MangaDexError> {
         let response = self
             .send(
                 self.http
@@ -386,6 +455,33 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_opens_after_consecutive_failures() {
+        let breaker = MangaDexCircuitBreaker::new(3, Duration::from_millis(20));
+
+        for _ in 0..3 {
+            assert!(breaker.allows_request().await);
+            breaker.record_result(false).await;
+        }
+        assert!(!breaker.allows_request().await);
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(breaker.allows_request().await);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_resets_after_a_success() {
+        let breaker = MangaDexCircuitBreaker::new(3, Duration::from_secs(1));
+
+        breaker.record_result(false).await;
+        breaker.record_result(false).await;
+        breaker.record_result(true).await;
+        breaker.record_result(false).await;
+        breaker.record_result(false).await;
+
+        assert!(breaker.allows_request().await);
     }
 
     #[test]

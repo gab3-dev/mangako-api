@@ -78,7 +78,7 @@ Cache state is local to each API process. A multi-instance deployment should mov
 
 Fallback statistics are process-local and reset when the API restarts. Request metrics are retained in PostgreSQL as hourly aggregates; retain or export them externally for history beyond the seven-day endpoint window.
 
-Catalog requests are rate-limited in the API, and outbound MangaDex calls are serialized with a 250 ms minimum interval (at most four requests per second).
+Catalog requests are rate-limited in the API, and outbound MangaDex calls are serialized with a 250 ms minimum interval (at most four requests per second). After three consecutive MangaDex failures, a shared circuit breaker stops external calls for five minutes and the API serves local fallback data when available.
 
 Every response receives an `X-Request-Id`, and request logs include request ID, method, URI, status, and latency. Authorization headers are not logged. MangaDex requests use a 5-second connection timeout and a 15-second total timeout.
 

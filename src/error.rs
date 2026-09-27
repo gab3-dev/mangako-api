@@ -4,6 +4,8 @@ use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::mangadex::MangaDexError;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("missing required environment variable {name}")]
@@ -18,6 +20,8 @@ pub enum ApiError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("external service error: {0}")]
     External(#[from] reqwest::Error),
+    #[error(transparent)]
+    MangaDex(#[from] MangaDexError),
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("{message}")]
@@ -54,12 +58,17 @@ impl IntoResponse for ApiError {
             Self::CoverStorageUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "cover_storage_unavailable")
             }
+            Self::MangaDex(MangaDexError::CircuitOpen) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "mangadex_unavailable")
+            }
             Self::MissingEnv { .. } | Self::InvalidEnv { .. } | Self::InvalidAddr(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "configuration_error")
             }
-            Self::Database(_) | Self::Migration(_) | Self::External(_) | Self::Io(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-            }
+            Self::Database(_)
+            | Self::Migration(_)
+            | Self::External(_)
+            | Self::MangaDex(MangaDexError::Request(_))
+            | Self::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
         if status.is_server_error() {
             tracing::error!(error = ?self, %status, "request failed");

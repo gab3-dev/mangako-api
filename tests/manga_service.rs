@@ -9,7 +9,8 @@ use uuid::Uuid;
 use mangako_api::{
     manga_service::MangaService,
     mangadex::{
-        MangaDexApi, MangaDexAttributes, MangaDexCover, MangaDexCoverAttributes, MangaDexManga,
+        MangaDexApi, MangaDexAttributes, MangaDexCover, MangaDexCoverAttributes, MangaDexError,
+        MangaDexManga,
     },
 };
 
@@ -21,7 +22,7 @@ struct FakeMangaDex {
 }
 
 impl MangaDexApi for FakeMangaDex {
-    async fn get_manga(&self, id: Uuid) -> Result<Option<MangaDexManga>, reqwest::Error> {
+    async fn get_manga(&self, id: Uuid) -> Result<Option<MangaDexManga>, MangaDexError> {
         self.calls.lock().unwrap().push(format!("get_manga:{id}"));
         Ok(None)
     }
@@ -31,7 +32,7 @@ impl MangaDexApi for FakeMangaDex {
         title: Option<&str>,
         offset: u32,
         limit: u32,
-    ) -> Result<Vec<MangaDexManga>, reqwest::Error> {
+    ) -> Result<Vec<MangaDexManga>, MangaDexError> {
         self.calls
             .lock()
             .unwrap()
@@ -44,7 +45,7 @@ impl MangaDexApi for FakeMangaDex {
         manga_id: Uuid,
         _offset: u32,
         _limit: u32,
-    ) -> Result<Vec<MangaDexCover>, reqwest::Error> {
+    ) -> Result<Vec<MangaDexCover>, MangaDexError> {
         self.calls
             .lock()
             .unwrap()
@@ -60,7 +61,7 @@ impl MangaDexApi for FakeMangaDex {
         &self,
         manga_id: Uuid,
         language: &str,
-    ) -> Result<Option<String>, reqwest::Error> {
+    ) -> Result<Option<String>, MangaDexError> {
         self.calls
             .lock()
             .unwrap()
