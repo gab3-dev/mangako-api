@@ -18,7 +18,8 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use sqlx::PgPool;
 use tower_http::{
     LatencyUnit,
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -28,6 +29,101 @@ use tracing::Level;
 
 const X_CACHE: HeaderName = HeaderName::from_static("x-cache");
 const MAX_CACHE_ENTRY_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone)]
+pub struct RequestMetrics {
+    pool: PgPool,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMetricsResponse {
+    pub window_started_at: DateTime<Utc>,
+    pub window_ended_at: DateTime<Utc>,
+    pub request_count: i64,
+    pub mangadex_attempt_count: i64,
+    pub mangadex_success_count: i64,
+    pub mangadex_failure_count: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct RequestMetricsRow {
+    request_count: i64,
+    mangadex_attempt_count: i64,
+    mangadex_success_count: i64,
+    mangadex_failure_count: i64,
+}
+
+impl RequestMetrics {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn record_api_request(&self) -> Result<(), sqlx::Error> {
+        self.record(1, 0, 0, 0).await
+    }
+
+    pub async fn record_mangadex_result(&self, success: bool) -> Result<(), sqlx::Error> {
+        self.record(0, 1, i64::from(success), i64::from(!success))
+            .await
+    }
+
+    pub async fn snapshot_last_week(&self) -> Result<RequestMetricsResponse, sqlx::Error> {
+        let window_ended_at = Utc::now();
+        let window_started_at = window_ended_at - ChronoDuration::days(7);
+        let row = sqlx::query_as::<_, RequestMetricsRow>(
+            r#"
+            SELECT COALESCE(SUM(request_count), 0)::bigint AS request_count,
+                   COALESCE(SUM(mangadex_attempt_count), 0)::bigint AS mangadex_attempt_count,
+                   COALESCE(SUM(mangadex_success_count), 0)::bigint AS mangadex_success_count,
+                   COALESCE(SUM(mangadex_failure_count), 0)::bigint AS mangadex_failure_count
+            FROM request_metrics_hourly
+            WHERE bucket_start >= date_trunc('hour', $1)
+            "#,
+        )
+        .bind(window_started_at)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(RequestMetricsResponse {
+            window_started_at,
+            window_ended_at,
+            request_count: row.request_count,
+            mangadex_attempt_count: row.mangadex_attempt_count,
+            mangadex_success_count: row.mangadex_success_count,
+            mangadex_failure_count: row.mangadex_failure_count,
+        })
+    }
+
+    async fn record(
+        &self,
+        request_count: i64,
+        mangadex_attempt_count: i64,
+        mangadex_success_count: i64,
+        mangadex_failure_count: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO request_metrics_hourly (
+                bucket_start, request_count, mangadex_attempt_count,
+                mangadex_success_count, mangadex_failure_count
+            )
+            VALUES (date_trunc('hour', now()), $1, $2, $3, $4)
+            ON CONFLICT (bucket_start) DO UPDATE
+            SET request_count = request_metrics_hourly.request_count + EXCLUDED.request_count,
+                mangadex_attempt_count = request_metrics_hourly.mangadex_attempt_count + EXCLUDED.mangadex_attempt_count,
+                mangadex_success_count = request_metrics_hourly.mangadex_success_count + EXCLUDED.mangadex_success_count,
+                mangadex_failure_count = request_metrics_hourly.mangadex_failure_count + EXCLUDED.mangadex_failure_count
+            "#,
+        )
+        .bind(request_count)
+        .bind(mangadex_attempt_count)
+        .bind(mangadex_success_count)
+        .bind(mangadex_failure_count)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct OperationalConfig {
@@ -196,6 +292,18 @@ pub async fn track_catalog_request(
 ) -> Response {
     request.extensions_mut().insert(metrics.track_request());
     next.run(request).await
+}
+
+pub async fn track_api_request(
+    State(metrics): State<RequestMetrics>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let response = next.run(request).await;
+    if let Err(error) = metrics.record_api_request().await {
+        tracing::warn!(%error, "failed to record API request metric");
+    }
+    response
 }
 
 pub async fn rate_limit_request(

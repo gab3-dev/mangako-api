@@ -17,7 +17,7 @@ use crate::{
     cover_storage::record_upload,
     cover_storage::{CoverStorage, ready_image_url},
     error::{ApiError, ErrorResponse},
-    operations::{CacheTtl, FallbackRequest, FallbackStatsResponse},
+    operations::{CacheTtl, FallbackRequest, FallbackStatsResponse, RequestMetricsResponse},
 };
 
 const MAX_PAGE_SIZE: u32 = 100;
@@ -756,6 +756,18 @@ pub async fn delete_manga_volume(
 )]
 pub async fn mangadex_fallback_stats(State(state): State<AppState>) -> Json<FallbackStatsResponse> {
     Json(state.fallback_metrics.snapshot())
+}
+
+#[utoipa::path(
+    get,
+    path = "/stats/requests",
+    security(("read_token" = [])),
+    responses((status = 200, description = "API and MangaDex request metrics for the last seven days", body = RequestMetricsResponse))
+)]
+pub async fn request_metrics(
+    State(state): State<AppState>,
+) -> Result<Json<RequestMetricsResponse>, ApiError> {
+    Ok(Json(state.request_metrics.snapshot_last_week().await?))
 }
 
 pub async fn load_manga_response(

@@ -58,6 +58,17 @@ curl --fail --silent --show-error \
   "${API_BASE_URL}/mangas/${manga_id}/volumes?locale=en" \
   | jq --exit-status 'length == 0' >/dev/null
 
+metrics=$(curl --fail --silent --show-error \
+  --header "$read_auth" \
+  "${API_BASE_URL}/stats/requests")
+jq --exit-status '
+  .requestCount >= 7 and
+  .mangadexAttemptCount >= .mangadexSuccessCount and
+  .mangadexAttemptCount >= .mangadexFailureCount and
+  (.windowStartedAt | type == "string") and
+  (.windowEndedAt | type == "string")
+' <<<"$metrics" >/dev/null
+
 test "$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   --request DELETE --header "$write_auth" \
   "${API_BASE_URL}/mangas/${manga_id}")" = "204"

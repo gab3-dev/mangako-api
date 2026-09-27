@@ -72,12 +72,13 @@ RUST_LOG=mangako_api=info,tower_http=info
 - Searches without a title use a response-specific cache TTL of 6 hours.
 - Requests with `refresh=true` bypass and invalidate cached pages for that endpoint.
 - `GET /stats/mangadex-fallback` requires an API token and reports `catalogRequests`, `fallbackRequests`, and `fallbackRate` since the API process started. A request counts as a fallback at most once, including when serving stale local manga or volumes after MangaDex fails.
+- `GET /stats/requests` requires the read token and reports seven-day totals for catalog API requests plus MangaDex attempts, successes, and failures. Metrics are aggregated by UTC hour and survive API restarts.
 
 Cache state is local to each API process. A multi-instance deployment should move caching to a reverse proxy, CDN, API gateway, or shared Redis-backed implementation.
 
-Fallback statistics are also process-local and reset when the API restarts. Poll and retain this endpoint externally when longer historical analysis is required.
+Fallback statistics are process-local and reset when the API restarts. Request metrics are retained in PostgreSQL as hourly aggregates; retain or export them externally for history beyond the seven-day endpoint window.
 
-Rate limiting is intentionally not implemented inside the API. If it becomes necessary, configure it at the reverse proxy, CDN, or API gateway layer.
+Catalog requests are rate-limited in the API, and outbound MangaDex calls are serialized with a 250 ms minimum interval (at most four requests per second).
 
 Every response receives an `X-Request-Id`, and request logs include request ID, method, URI, status, and latency. Authorization headers are not logged. MangaDex requests use a 5-second connection timeout and a 15-second total timeout.
 
@@ -110,6 +111,7 @@ Back up the `cover-data` Docker volume together with PostgreSQL. Removing that v
 - `GET /api-docs/openapi.json`: OpenAPI JSON specification.
 - `GET /health`: returns `ok`.
 - `GET /stats/mangadex-fallback`: requires API token. Returns MangaDex fallback statistics since process start.
+- `GET /stats/requests`: requires the read token. Returns seven-day catalog request and MangaDex outcome totals.
 - `POST /mangas`: requires API token. Creates a local-only manga, including metadata, localizations, aliases, and general covers. Local-only manga are never refreshed from MangaDex and are returned by title search before MangaDex is queried.
 - `PATCH /mangas/{id_or_slug}` and `DELETE /mangas/{id_or_slug}`: require the write token. Update catalog metadata partially or soft-delete a manga.
 - `POST /mangas/{id_or_slug}/covers`: requires API token. Adds a general cover by external `sourceUrl` or internal `storageKey`; setting `isPrimary` replaces the current primary cover.

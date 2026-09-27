@@ -16,13 +16,14 @@ use crate::{
     manga_service::MangaService,
     mangadex::MangaDexClient,
     openapi::ApiDoc,
-    operations::{FallbackMetrics, OperationalConfig, RateLimiter, ResponseCache},
+    operations::{FallbackMetrics, OperationalConfig, RateLimiter, RequestMetrics, ResponseCache},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     pub manga_service: MangaService,
     pub fallback_metrics: FallbackMetrics,
+    pub request_metrics: RequestMetrics,
     pub cover_storage: Option<CoverStorage>,
 }
 
@@ -71,7 +72,8 @@ fn build_router(
         .timeout(Duration::from_secs(15))
         .build()
         .expect("valid reqwest client");
-    let mangadex = MangaDexClient::new(http);
+    let request_metrics = RequestMetrics::new(pool.clone());
+    let mangadex = MangaDexClient::new(http, request_metrics.clone());
     let manga_service = MangaService::new(pool, mangadex);
     let fallback_metrics = FallbackMetrics::new();
 
@@ -80,10 +82,12 @@ fn build_router(
         .route("/mangas/", get(manga::search_mangas))
         .route("/mangas/{manga_ref}", get(manga::get_manga))
         .route("/mangas/{manga_ref}/volumes", get(manga::get_manga_volumes));
-    let mut stats = Router::new().route(
-        "/stats/mangadex-fallback",
-        get(manga::mangadex_fallback_stats),
-    );
+    let mut stats = Router::new()
+        .route(
+            "/stats/mangadex-fallback",
+            get(manga::mangadex_fallback_stats),
+        )
+        .route("/stats/requests", get(manga::request_metrics));
     let mut write_catalog = Router::new()
         .route("/mangas", post(manga::create_manga))
         .route(
@@ -134,6 +138,14 @@ fn build_router(
         fallback_metrics.clone(),
         crate::operations::track_catalog_request,
     ));
+    read_catalog = read_catalog.layer(middleware::from_fn_with_state(
+        request_metrics.clone(),
+        crate::operations::track_api_request,
+    ));
+    write_catalog = write_catalog.layer(middleware::from_fn_with_state(
+        request_metrics.clone(),
+        crate::operations::track_api_request,
+    ));
     let limiter = RateLimiter::new(operations.rate_limit);
     read_catalog = read_catalog.layer(middleware::from_fn_with_state(
         limiter.clone(),
@@ -171,6 +183,7 @@ fn build_router(
         .with_state(AppState {
             manga_service,
             fallback_metrics,
+            request_metrics,
             cover_storage,
         })
 }

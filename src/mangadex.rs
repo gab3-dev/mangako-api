@@ -8,6 +8,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::operations::RequestMetrics;
+
 const MANGADEX_MAX_CONCURRENT_REQUESTS: usize = 1;
 const MANGADEX_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -79,10 +81,11 @@ pub struct MangaDexClient {
     http: reqwest::Client,
     base_url: String,
     limiter: MangaDexRequestLimiter,
+    metrics: RequestMetrics,
 }
 
 impl MangaDexClient {
-    pub fn new(http: reqwest::Client) -> Self {
+    pub fn new(http: reqwest::Client, metrics: RequestMetrics) -> Self {
         Self {
             http,
             base_url: "https://api.mangadex.org".to_string(),
@@ -90,6 +93,7 @@ impl MangaDexClient {
                 MANGADEX_MAX_CONCURRENT_REQUESTS,
                 MANGADEX_MIN_REQUEST_INTERVAL,
             ),
+            metrics,
         }
     }
 
@@ -98,7 +102,14 @@ impl MangaDexClient {
         request: reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, reqwest::Error> {
         let _permit = self.limiter.acquire().await;
-        request.send().await
+        let response = request.send().await;
+        let success = response
+            .as_ref()
+            .is_ok_and(|response| response.status().is_success());
+        if let Err(error) = self.metrics.record_mangadex_result(success).await {
+            tracing::warn!(%error, "failed to record MangaDex request metric");
+        }
+        response
     }
 }
 

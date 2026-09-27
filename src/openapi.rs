@@ -9,7 +9,7 @@ use crate::{
         MangaCreatorResponse, MangaLocalizationResponse, MangaResponse, MangaVolumeResponse,
         UpdateMangaRequest, UpdateMangaVolumeRequest,
     },
-    operations::FallbackStatsResponse,
+    operations::{FallbackStatsResponse, RequestMetricsResponse},
 };
 
 #[derive(OpenApi)]
@@ -32,7 +32,8 @@ use crate::{
         crate::manga::upload_manga_volume,
         crate::manga::update_manga_volume,
         crate::manga::delete_manga_volume,
-        crate::manga::mangadex_fallback_stats
+        crate::manga::mangadex_fallback_stats,
+        crate::manga::request_metrics
     ),
     components(
         schemas(
@@ -50,7 +51,8 @@ use crate::{
             MangaLocalizationResponse,
             MangaResponse,
             MangaVolumeResponse,
-            FallbackStatsResponse
+            FallbackStatsResponse,
+            RequestMetricsResponse
         )
     ),
     modifiers(&SecurityAddon),

@@ -90,6 +90,7 @@ async fn openapi_and_swagger_ui_are_served() {
     assert!(openapi["paths"]["/mangas/{manga_ref}/volumes/{volume_id}"]["patch"].is_object());
     assert!(openapi["paths"]["/mangas/{manga_ref}/volumes/{volume_id}"]["delete"].is_object());
     assert!(openapi["paths"].get("/stats/mangadex-fallback").is_some());
+    assert!(openapi["paths"].get("/stats/requests").is_some());
 
     let docs_response = app
         .oneshot(Request::builder().uri("/docs").body(Body::empty()).unwrap())
@@ -278,7 +279,7 @@ async fn health_and_docs_stay_public_when_api_token_is_configured() {
 }
 
 #[tokio::test]
-async fn mangadex_fallback_stats_require_an_api_token() {
+async fn stats_require_an_api_token() {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://mangako:mangako@localhost:5432/mangako_api")
         .expect("valid database URL");
@@ -288,17 +289,14 @@ async fn mangadex_fallback_stats_require_an_api_token() {
         "write-token-for-tests".to_string(),
     );
 
-    let unauthorized = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/stats/mangadex-fallback")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(unauthorized.status(), axum::http::StatusCode::UNAUTHORIZED);
+    for path in ["/stats/mangadex-fallback", "/stats/requests"] {
+        let unauthorized = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), axum::http::StatusCode::UNAUTHORIZED);
+    }
 
     let response = app
         .oneshot(
@@ -321,4 +319,25 @@ async fn mangadex_fallback_stats_require_an_api_token() {
     assert_eq!(stats["catalogRequests"], 0);
     assert_eq!(stats["fallbackRequests"], 0);
     assert_eq!(stats["fallbackRate"], 0.0);
+}
+
+#[tokio::test]
+async fn request_metrics_persist_api_and_mangadex_outcomes() {
+    let pool = PgPoolOptions::new()
+        .connect("postgres://mangako:mangako@localhost:5432/mangako_api")
+        .await
+        .expect("PostgreSQL must be available for integration tests");
+    mangako_api::db::migrate(&pool).await.unwrap();
+    let metrics = mangako_api::operations::RequestMetrics::new(pool);
+    let before = metrics.snapshot_last_week().await.unwrap();
+
+    metrics.record_api_request().await.unwrap();
+    metrics.record_mangadex_result(true).await.unwrap();
+    metrics.record_mangadex_result(false).await.unwrap();
+
+    let after = metrics.snapshot_last_week().await.unwrap();
+    assert!(after.request_count > before.request_count);
+    assert!(after.mangadex_attempt_count >= before.mangadex_attempt_count + 2);
+    assert!(after.mangadex_success_count > before.mangadex_success_count);
+    assert!(after.mangadex_failure_count > before.mangadex_failure_count);
 }
