@@ -14,6 +14,7 @@ const MANGADEX_MAX_CONCURRENT_REQUESTS: usize = 1;
 const MANGADEX_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 const MANGADEX_FAILURE_THRESHOLD: u32 = 3;
 const MANGADEX_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const MANGADEX_CIRCUIT_MAX_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MangaDexError {
@@ -60,6 +61,15 @@ struct MangaDexCircuitBreaker {
 struct MangaDexCircuitState {
     consecutive_failures: u32,
     open_until: Option<Instant>,
+    half_open_probe_active: bool,
+    open_count: u32,
+}
+
+#[derive(Clone, Copy)]
+enum MangaDexRequestResult {
+    Success,
+    Failure,
+    Throttled,
 }
 
 impl MangaDexCircuitBreaker {
@@ -68,6 +78,8 @@ impl MangaDexCircuitBreaker {
             state: Arc::new(Mutex::new(MangaDexCircuitState {
                 consecutive_failures: 0,
                 open_until: None,
+                half_open_probe_active: false,
+                open_count: 0,
             })),
             failure_threshold,
             cooldown,
@@ -80,22 +92,39 @@ impl MangaDexCircuitBreaker {
             if open_until > Instant::now() {
                 return false;
             }
-            state.open_until = None;
-            state.consecutive_failures = 0;
+            if state.half_open_probe_active {
+                return false;
+            }
+            state.half_open_probe_active = true;
         }
         true
     }
 
-    async fn record_result(&self, success: bool) {
+    async fn record_result(&self, result: MangaDexRequestResult) {
         let mut state = self.state.lock().await;
-        if success {
+        if matches!(result, MangaDexRequestResult::Success) {
             state.consecutive_failures = 0;
             state.open_until = None;
+            state.half_open_probe_active = false;
+            state.open_count = 0;
             return;
         }
+        let failed_probe = state.half_open_probe_active;
+        state.half_open_probe_active = false;
         state.consecutive_failures += 1;
-        if state.consecutive_failures >= self.failure_threshold {
-            state.open_until = Some(Instant::now() + self.cooldown);
+        if matches!(result, MangaDexRequestResult::Throttled)
+            || failed_probe
+            || state.consecutive_failures >= self.failure_threshold
+        {
+            let multiplier = 1_u32 << state.open_count.min(3);
+            let cooldown = self
+                .cooldown
+                .checked_mul(multiplier)
+                .unwrap_or(MANGADEX_CIRCUIT_MAX_COOLDOWN)
+                .min(MANGADEX_CIRCUIT_MAX_COOLDOWN);
+            state.open_until = Some(Instant::now() + cooldown);
+            state.consecutive_failures = 0;
+            state.open_count = state.open_count.saturating_add(1);
         }
     }
 }
@@ -171,13 +200,26 @@ impl MangaDexClient {
             return Err(MangaDexError::CircuitOpen);
         }
         let response = request.send().await;
-        let success = response
-            .as_ref()
-            .is_ok_and(|response| response.status().is_success());
-        if let Err(error) = self.metrics.record_mangadex_result(success).await {
+        let result = match response.as_ref() {
+            Ok(response) if response.status().is_success() => MangaDexRequestResult::Success,
+            Ok(response)
+                if matches!(
+                    response.status(),
+                    reqwest::StatusCode::TOO_MANY_REQUESTS | reqwest::StatusCode::FORBIDDEN
+                ) =>
+            {
+                MangaDexRequestResult::Throttled
+            }
+            _ => MangaDexRequestResult::Failure,
+        };
+        if let Err(error) = self
+            .metrics
+            .record_mangadex_result(matches!(result, MangaDexRequestResult::Success))
+            .await
+        {
             tracing::warn!(%error, "failed to record MangaDex request metric");
         }
-        self.circuit_breaker.record_result(success).await;
+        self.circuit_breaker.record_result(result).await;
         response.map_err(MangaDexError::from)
     }
 }
@@ -463,7 +505,7 @@ mod tests {
 
         for _ in 0..3 {
             assert!(breaker.allows_request().await);
-            breaker.record_result(false).await;
+            breaker.record_result(MangaDexRequestResult::Failure).await;
         }
         assert!(!breaker.allows_request().await);
 
@@ -472,14 +514,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn circuit_breaker_opens_immediately_on_throttle_and_allows_one_probe() {
+        let breaker = MangaDexCircuitBreaker::new(3, Duration::from_millis(20));
+
+        breaker
+            .record_result(MangaDexRequestResult::Throttled)
+            .await;
+        assert!(!breaker.allows_request().await);
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(breaker.allows_request().await);
+        assert!(!breaker.allows_request().await);
+
+        breaker.record_result(MangaDexRequestResult::Failure).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!breaker.allows_request().await);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(breaker.allows_request().await);
+    }
+
+    #[tokio::test]
     async fn circuit_breaker_resets_after_a_success() {
         let breaker = MangaDexCircuitBreaker::new(3, Duration::from_secs(1));
 
-        breaker.record_result(false).await;
-        breaker.record_result(false).await;
-        breaker.record_result(true).await;
-        breaker.record_result(false).await;
-        breaker.record_result(false).await;
+        breaker.record_result(MangaDexRequestResult::Failure).await;
+        breaker.record_result(MangaDexRequestResult::Failure).await;
+        breaker.record_result(MangaDexRequestResult::Success).await;
+        breaker.record_result(MangaDexRequestResult::Failure).await;
+        breaker.record_result(MangaDexRequestResult::Failure).await;
 
         assert!(breaker.allows_request().await);
     }
