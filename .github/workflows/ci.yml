@@ -101,9 +101,12 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - name: Configure the production host key
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
           install -d -m 700 ~/.ssh
-          printf '%s\n' '147.15.69.58 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINLrNji9HsxQW2UuQvyrMNdJaxVZJGI/PejHuibMOE66' > ~/.ssh/known_hosts
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST secret}"
+          printf '%s %s\n' "$DEPLOY_HOST" 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINLrNji9HsxQW2UuQvyrMNdJaxVZJGI/PejHuibMOE66' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
       - name: Load the deployment key
         uses: webfactory/ssh-agent@a6f90b1f127823b31d4d4a8d96047790581349bd
@@ -112,11 +115,15 @@ jobs:
       - name: Update the API
         env:
           IMAGE: ghcr.io/${{ github.repository }}@${{ needs.image.outputs.digest }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          scp -o BatchMode=yes docker-compose.prod.yml ubuntu@147.15.69.58:/opt/mangako-api/docker-compose.prod.yml
-          scp -o BatchMode=yes deploy/Caddyfile ubuntu@147.15.69.58:/opt/mangako-api/deploy/Caddyfile
-          scp -o BatchMode=yes deploy/authenticated_origin_pull_ca.pem ubuntu@147.15.69.58:/opt/mangako-api/deploy/authenticated_origin_pull_ca.pem
-          ssh -o BatchMode=yes ubuntu@147.15.69.58 "
+          : "${DEPLOY_HOST:?missing DEPLOY_HOST secret}"
+          : "${DEPLOY_USER:?missing DEPLOY_USER secret}"
+          scp -o BatchMode=yes docker-compose.prod.yml "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/mangako-api/docker-compose.prod.yml"
+          scp -o BatchMode=yes deploy/Caddyfile "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/mangako-api/deploy/Caddyfile"
+          scp -o BatchMode=yes deploy/authenticated_origin_pull_ca.pem "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/mangako-api/deploy/authenticated_origin_pull_ca.pem"
+          ssh -o BatchMode=yes "${DEPLOY_USER}@${DEPLOY_HOST}" "
             cd /opt/mangako-api &&
             MANGAKO_API_IMAGE='$IMAGE' docker compose --env-file .env.production -f docker-compose.prod.yml pull api &&
             MANGAKO_API_IMAGE='$IMAGE' docker compose --env-file .env.production -f docker-compose.prod.yml up -d --wait api caddy
