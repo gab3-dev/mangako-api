@@ -1,15 +1,21 @@
 use std::{path::PathBuf, time::Duration};
 
+use chrono::{DateTime, Utc};
 use image::ImageFormat;
-use reqwest::Url;
+use reqwest::{StatusCode, Url, header::RETRY_AFTER};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
-use tokio::{fs, io::AsyncWriteExt};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use tokio::{fs, io::AsyncWriteExt, time::sleep};
 use uuid::Uuid;
 
 use crate::error::ApiError;
 
 const ALLOWED_MANGADEX_HOST: &str = "uploads.mangadex.org";
+const COVER_DOWNLOAD_LOCK_KEY: i64 = 8_867_291;
+const COVER_DOWNLOAD_INTERVAL: Duration = Duration::from_secs(1);
+const COVER_RETRY_BASE_DELAY: Duration = Duration::from_secs(30);
+const COVER_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
+const COVER_THROTTLE_DELAY: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Clone)]
 pub struct CoverStorage {
@@ -157,67 +163,149 @@ pub async fn process_next(
     storage: &CoverStorage,
     client: &reqwest::Client,
 ) -> Result<bool, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(COVER_DOWNLOAD_LOCK_KEY)
+        .fetch_one(&mut *connection)
+        .await?;
+    if !locked {
+        return Ok(false);
+    }
+
+    let result = process_next_locked(&mut connection, storage, client).await;
+    let unlock = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+        .bind(COVER_DOWNLOAD_LOCK_KEY)
+        .fetch_one(&mut *connection)
+        .await;
+    unlock?;
+    result
+}
+
+async fn process_next_locked(
+    connection: &mut PgConnection,
+    storage: &CoverStorage,
+    client: &reqwest::Client,
+) -> Result<bool, sqlx::Error> {
     let asset = sqlx::query_as::<_, PendingAsset>(
         r#"UPDATE cover_assets SET locked_until = now() + interval '2 minutes', attempt_count = attempt_count + 1
            WHERE id = (SELECT id FROM cover_assets WHERE source_url IS NOT NULL AND status IN ('pending', 'failed')
              AND next_attempt_at <= now() AND (locked_until IS NULL OR locked_until < now()) ORDER BY next_attempt_at LIMIT 1 FOR UPDATE SKIP LOCKED)
            RETURNING id, source_url, attempt_count"#,
-    ).fetch_optional(pool).await?;
+    )
+    .fetch_optional(&mut *connection)
+    .await?;
     let Some(asset) = asset else { return Ok(false) };
+    wait_for_download_slot(connection).await?;
     let outcome = mirror_asset(storage, client, &asset.source_url).await;
     match outcome {
         Ok(image) => {
             sqlx::query("UPDATE cover_assets SET storage_key=$2, thumbnail_storage_key=$3, status='ready', content_type=$4, byte_size=$5, width=$6, height=$7, sha256=$8, locked_until=NULL, last_error=NULL WHERE id=$1")
-                .bind(asset.id).bind(image.storage_key).bind(image.thumbnail_storage_key).bind(image.content_type).bind(image.byte_size).bind(image.width).bind(image.height).bind(image.sha256).execute(pool).await?;
+                .bind(asset.id).bind(image.storage_key).bind(image.thumbnail_storage_key).bind(image.content_type).bind(image.byte_size).bind(image.width).bind(image.height).bind(image.sha256).execute(&mut *connection).await?;
         }
         Err(error) => {
-            let delay =
-                Duration::from_secs(2_u64.saturating_pow(asset.attempt_count.min(8) as u32));
+            let delay = error.retry_delay(asset.attempt_count);
             sqlx::query("UPDATE cover_assets SET status='failed', locked_until=NULL, next_attempt_at=now() + $2::bigint * interval '1 second', last_error=$3 WHERE id=$1")
-                .bind(asset.id).bind(delay.as_secs() as i64).bind(error).execute(pool).await?;
+                .bind(asset.id).bind(delay.as_secs() as i64).bind(error.message).execute(&mut *connection).await?;
         }
     }
     Ok(true)
+}
+
+async fn wait_for_download_slot(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let scheduled_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        "UPDATE cover_download_schedule SET next_download_at=GREATEST(next_download_at, now()) + $1::bigint * interval '1 second' WHERE id RETURNING next_download_at - $1::bigint * interval '1 second'",
+    )
+    .bind(COVER_DOWNLOAD_INTERVAL.as_secs() as i64)
+    .fetch_one(&mut *connection)
+    .await?;
+    if let Ok(delay) = (scheduled_at - Utc::now()).to_std() {
+        sleep(delay).await;
+    }
+    Ok(())
 }
 
 async fn mirror_asset(
     storage: &CoverStorage,
     client: &reqwest::Client,
     source_url: &str,
-) -> Result<StoredImage, String> {
-    let url = Url::parse(source_url).map_err(|_| "invalid source URL".to_string())?;
+) -> Result<StoredImage, MirrorError> {
+    let url = Url::parse(source_url).map_err(|_| MirrorError::new("invalid source URL"))?;
     if url.scheme() != "https" || url.host_str() != Some(ALLOWED_MANGADEX_HOST) {
-        return Err("source host is not allowed".to_string());
+        return Err(MirrorError::new("source host is not allowed"));
     }
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|_| "cover download failed".to_string())?
-        .error_for_status()
-        .map_err(|_| "cover download returned an error".to_string())?;
+        .map_err(|_| MirrorError::new("cover download failed"))?;
+    if !response.status().is_success() {
+        return Err(MirrorError {
+            message: "cover download returned an error".to_string(),
+            retry_after: retry_after(response.headers().get(RETRY_AFTER)),
+            throttled: matches!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::FORBIDDEN
+            ),
+        });
+    }
     if response
         .content_length()
         .is_some_and(|length| length > storage.max_bytes as u64)
     {
-        return Err("cover download exceeds size limit".to_string());
+        return Err(MirrorError::new("cover download exceeds size limit"));
     }
     let mut body = Vec::new();
     let mut response = response;
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| "cover download failed".to_string())?
+        .map_err(|_| MirrorError::new("cover download failed"))?
     {
         if body.len().saturating_add(chunk.len()) > storage.max_bytes {
-            return Err("cover download exceeds size limit".to_string());
+            return Err(MirrorError::new("cover download exceeds size limit"));
         }
         body.extend_from_slice(&chunk);
     }
     storage
         .store_upload(&body)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| MirrorError::new(error.to_string()))
+}
+
+struct MirrorError {
+    message: String,
+    retry_after: Option<Duration>,
+    throttled: bool,
+}
+
+impl MirrorError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retry_after: None,
+            throttled: false,
+        }
+    }
+
+    fn retry_delay(&self, attempt_count: i32) -> Duration {
+        let retry_delay = COVER_RETRY_BASE_DELAY
+            .checked_mul(1_u32 << attempt_count.saturating_sub(1).clamp(0, 7))
+            .unwrap_or(COVER_RETRY_MAX_DELAY)
+            .min(COVER_RETRY_MAX_DELAY);
+        let minimum_delay = if self.throttled {
+            COVER_THROTTLE_DELAY
+        } else {
+            retry_delay
+        };
+        self.retry_after.unwrap_or_default().max(minimum_delay)
+    }
+}
+
+fn retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
+    value
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 #[derive(sqlx::FromRow)]
@@ -236,5 +324,27 @@ pub fn ready_image_url(
         Some(base?.public_url(storage_key?))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_download_retries_back_off_to_one_hour() {
+        let error = MirrorError::new("temporary failure");
+        assert_eq!(error.retry_delay(1), Duration::from_secs(30));
+        assert_eq!(error.retry_delay(8), Duration::from_secs(60 * 60));
+    }
+
+    #[test]
+    fn throttled_download_waits_at_least_thirty_minutes() {
+        let error = MirrorError {
+            message: "throttled".to_string(),
+            retry_after: Some(Duration::from_secs(45 * 60)),
+            throttled: true,
+        };
+        assert_eq!(error.retry_delay(1), Duration::from_secs(45 * 60));
     }
 }

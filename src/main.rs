@@ -26,6 +26,7 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
         let client = mangadex::http_client(worker_proxy_url, std::time::Duration::from_secs(30))
             .expect("MangaDex proxy URL is validated by Config");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             while let Ok(true) =

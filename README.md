@@ -90,7 +90,7 @@ CI publishes a `linux/amd64` image and runs an ARM64 smoke test. See `docs/arm64
 
 Production stores cover files in a persistent Docker volume and serves them publicly through Caddy at `/media/*`. The API never proxies image bytes.
 
-- MangaDex covers are queued for asynchronous mirroring after catalog synchronization. Existing MangaDex records are queued at startup as an incremental backfill.
+- MangaDex covers are queued for asynchronous mirroring after catalog synchronization. Existing MangaDex records are queued at startup as an incremental backfill. Downloads are globally serialized through PostgreSQL and start no more than once per second; `429` and `403` pause a failed cover for at least 30 minutes.
 - Each stored cover has an original asset and a JPEG thumbnail with a maximum width of 512 pixels. Thumbnail keys use the MangaDex-style `.512.jpg` suffix.
 - JSON responses preserve `sourceUrl` as provenance and fallback. `imageUrl` and `thumbnailUrl` are populated when the local asset is ready; `assetStatus` reports `pending`, `ready`, or `failed`.
 - Manual multipart uploads accept JPEG, PNG, and WebP. Files are size-limited, decoded for validation, hashed with SHA-256, and written using immutable keys.
