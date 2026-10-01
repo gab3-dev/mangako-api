@@ -1,5 +1,7 @@
 use std::{env, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
+use reqwest::Url;
+
 use crate::{
     auth::AuthConfig,
     cover_storage::CoverStorage,
@@ -13,6 +15,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub operations: OperationalConfig,
     pub cover_storage: CoverStorage,
+    pub mangadex_proxy_url: Option<Url>,
 }
 
 impl Config {
@@ -44,6 +47,7 @@ impl Config {
         let cover_public_base_url = env::var("COVER_PUBLIC_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:3000/media".to_string());
         let cover_max_upload_bytes = env_or("MAX_COVER_UPLOAD_BYTES", 8 * 1024 * 1024)?;
+        let mangadex_proxy_url = optional_http_url("MANGADEX_PROXY_URL")?;
 
         if cache_ttl_seconds > 0 {
             if cache_max_entries == 0 {
@@ -105,8 +109,30 @@ impl Config {
                 cover_public_base_url,
                 cover_max_upload_bytes,
             ),
+            mangadex_proxy_url,
         })
     }
+}
+
+fn optional_http_url(name: &'static str) -> Result<Option<Url>, ApiError> {
+    let Some(value) = env::var(name).ok().filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    parse_http_url(name, &value).map(Some)
+}
+
+fn parse_http_url(name: &'static str, value: &str) -> Result<Url, ApiError> {
+    let url = Url::parse(value).map_err(|error| ApiError::InvalidEnv {
+        name,
+        message: error.to_string(),
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ApiError::InvalidEnv {
+            name,
+            message: "must use an http or https URL".to_string(),
+        });
+    }
+    Ok(url)
 }
 
 fn required_token(name: &'static str) -> Result<String, ApiError> {
@@ -135,5 +161,22 @@ where
             name,
             message: error.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_http_url;
+
+    #[test]
+    fn proxy_url_rejects_non_http_schemes() {
+        let error = parse_http_url("MANGADEX_PROXY_URL", "socks5://10.89.0.1:8888").unwrap_err();
+        assert!(error.to_string().contains("http or https"));
+    }
+
+    #[test]
+    fn proxy_url_accepts_http_urls() {
+        let url = parse_http_url("MANGADEX_PROXY_URL", "http://10.89.0.1:8888").unwrap();
+        assert_eq!(url.scheme(), "http");
     }
 }

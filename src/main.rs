@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use mangako_api::{api, config::Config, db, operations};
+use mangako_api::{api, config::Config, db, mangadex, operations};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -21,12 +21,10 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
     config.cover_storage.ensure_root().await?;
     let worker_pool = pool.clone();
     let worker_storage = config.cover_storage.clone();
+    let worker_proxy_url = config.mangadex_proxy_url.clone();
     tokio::spawn(async move {
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("valid cover worker client");
+        let client = mangadex::http_client(worker_proxy_url, std::time::Duration::from_secs(30))
+            .expect("MangaDex proxy URL is validated by Config");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -36,11 +34,12 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
             {}
         }
     });
-    let app = operations::with_observability(api::router_with_cover_storage(
+    let app = operations::with_observability(api::router_with_mangadex_proxy(
         pool,
         config.auth,
         config.operations,
         config.cover_storage,
+        config.mangadex_proxy_url,
     ));
 
     let listener = TcpListener::bind(config.http_addr).await?;

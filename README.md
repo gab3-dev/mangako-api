@@ -78,7 +78,7 @@ Cache state is local to each API process. A multi-instance deployment should mov
 
 Fallback statistics are process-local and reset when the API restarts. Request metrics are retained in PostgreSQL as hourly aggregates; retain or export them externally for history beyond the seven-day endpoint window.
 
-Catalog requests are rate-limited in the API, and outbound MangaDex calls are serialized with a 250 ms minimum interval (at most four requests per second). A `429` or `403` opens a shared circuit breaker immediately; other failures open it after three consecutive errors. After a cooldown, one half-open probe is allowed. A failed probe reopens the circuit with exponential backoff, capped at one hour, and the API serves local fallback data when available.
+Catalog requests are rate-limited in the API, and outbound MangaDex calls are serialized with a 250 ms minimum interval (at most four requests per second). A `429` or `403` opens a shared circuit breaker immediately; other failures open it after three consecutive errors. After a cooldown, one half-open probe is allowed. A failed probe reopens the circuit with exponential backoff, capped at one hour, and the API serves local fallback data when available. Set `MANGADEX_PROXY_URL` to an `http://` or `https://` proxy when MangaDex traffic must use a separate egress; it affects only MangaDex catalog calls and the asynchronous MangaDex cover downloader.
 
 Every response receives an `X-Request-Id`, and request logs include request ID, method, URI, status, and latency. Authorization headers are not logged. MangaDex requests use a 5-second connection timeout and a 15-second total timeout.
 

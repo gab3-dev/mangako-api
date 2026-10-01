@@ -1,6 +1,7 @@
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
+use reqwest::{Client, Proxy, Url};
 use serde::Deserialize;
 use tokio::{
     sync::{Mutex, OwnedSemaphorePermit, Semaphore},
@@ -15,6 +16,18 @@ const MANGADEX_MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 const MANGADEX_FAILURE_THRESHOLD: u32 = 3;
 const MANGADEX_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MANGADEX_CIRCUIT_MAX_COOLDOWN: Duration = Duration::from_secs(60 * 60);
+
+pub fn http_client(proxy_url: Option<Url>, timeout: Duration) -> Result<Client, reqwest::Error> {
+    let builder = Client::builder()
+        .user_agent(concat!("mangako-api/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(timeout);
+    let builder = match proxy_url {
+        Some(proxy_url) => builder.proxy(Proxy::all(proxy_url)?),
+        None => builder,
+    };
+    builder.build()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MangaDexError {
@@ -167,7 +180,7 @@ impl MangaDexRequestLimiter {
 
 #[derive(Clone)]
 pub struct MangaDexClient {
-    http: reqwest::Client,
+    http: Client,
     base_url: String,
     limiter: MangaDexRequestLimiter,
     circuit_breaker: MangaDexCircuitBreaker,
@@ -175,7 +188,7 @@ pub struct MangaDexClient {
 }
 
 impl MangaDexClient {
-    pub fn new(http: reqwest::Client, metrics: RequestMetrics) -> Self {
+    pub fn new(http: Client, metrics: RequestMetrics) -> Self {
         Self {
             http,
             base_url: "https://api.mangadex.org".to_string(),
@@ -552,6 +565,12 @@ mod tests {
 
         assert!(query.contains(&("order[followedCount]", "desc".to_string())));
         assert!(!query.iter().any(|(key, _)| *key == "title"));
+    }
+
+    #[test]
+    fn http_client_accepts_an_http_proxy() {
+        let proxy_url = Url::parse("http://10.89.0.1:8888").unwrap();
+        assert!(http_client(Some(proxy_url), Duration::from_secs(1)).is_ok());
     }
 
     #[test]

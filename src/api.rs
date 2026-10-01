@@ -14,7 +14,7 @@ use crate::{
     cover_storage::CoverStorage,
     manga,
     manga_service::MangaService,
-    mangadex::MangaDexClient,
+    mangadex::{self, MangaDexClient},
     openapi::ApiDoc,
     operations::{FallbackMetrics, OperationalConfig, RateLimiter, RequestMetrics, ResponseCache},
 };
@@ -28,7 +28,7 @@ pub struct AppState {
 }
 
 pub fn router(pool: PgPool) -> Router {
-    build_router(pool, None, OperationalConfig::default(), None)
+    build_router(pool, None, OperationalConfig::default(), None, None)
 }
 
 pub fn router_with_api_tokens(pool: PgPool, read_token: String, write_token: String) -> Router {
@@ -40,6 +40,7 @@ pub fn router_with_api_tokens(pool: PgPool, read_token: String, write_token: Str
         }),
         OperationalConfig::default(),
         None,
+        None,
     )
 }
 
@@ -48,7 +49,7 @@ pub fn router_with_operations(
     auth: AuthConfig,
     operations: OperationalConfig,
 ) -> Router {
-    build_router(pool, Some(auth), operations, None)
+    build_router(pool, Some(auth), operations, None, None)
 }
 
 pub fn router_with_cover_storage(
@@ -57,7 +58,23 @@ pub fn router_with_cover_storage(
     operations: OperationalConfig,
     cover_storage: CoverStorage,
 ) -> Router {
-    build_router(pool, Some(auth), operations, Some(cover_storage))
+    router_with_mangadex_proxy(pool, auth, operations, cover_storage, None)
+}
+
+pub fn router_with_mangadex_proxy(
+    pool: PgPool,
+    auth: AuthConfig,
+    operations: OperationalConfig,
+    cover_storage: CoverStorage,
+    mangadex_proxy_url: Option<reqwest::Url>,
+) -> Router {
+    build_router(
+        pool,
+        Some(auth),
+        operations,
+        Some(cover_storage),
+        mangadex_proxy_url,
+    )
 }
 
 fn build_router(
@@ -65,13 +82,10 @@ fn build_router(
     auth: Option<AuthConfig>,
     operations: OperationalConfig,
     cover_storage: Option<CoverStorage>,
+    mangadex_proxy_url: Option<reqwest::Url>,
 ) -> Router {
-    let http = reqwest::Client::builder()
-        .user_agent(concat!("mangako-api/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
-        .build()
-        .expect("valid reqwest client");
+    let http = mangadex::http_client(mangadex_proxy_url, Duration::from_secs(15))
+        .expect("MangaDex proxy URL is validated by Config");
     let request_metrics = RequestMetrics::new(pool.clone());
     let mangadex = MangaDexClient::new(http, request_metrics.clone());
     let manga_service = MangaService::new(pool, mangadex);
