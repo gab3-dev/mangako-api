@@ -21,6 +21,8 @@ use crate::{
     operations::FallbackRequest,
 };
 
+const VOLUME_SYNC_TTL: Duration = Duration::hours(6);
+
 #[derive(Clone)]
 pub struct MangaService<C = MangaDexClient> {
     pool: PgPool,
@@ -152,6 +154,7 @@ where
         let mut tx = self.pool.begin().await?;
         let cover = insert_manual_cover(&mut tx, manga.id, request).await?;
         tx.commit().await?;
+        invalidate_volume_sync(&self.pool, manga.id).await?;
         Ok(cover)
     }
 
@@ -228,7 +231,7 @@ where
             }
         }
 
-        sqlx::query_as::<_, MangaVolumeResponse>(
+        let volume = sqlx::query_as::<_, MangaVolumeResponse>(
             r#"
             INSERT INTO manga_volumes (
                 manga_id, file_name, source_url, volume, volume_key, locale, is_special_edition
@@ -248,7 +251,9 @@ where
         .bind(is_special_edition)
         .fetch_one(&self.pool)
         .await
-        .map_err(map_unique_violation)
+        .map_err(map_unique_violation)?;
+        invalidate_volume_sync(&self.pool, manga.id).await?;
+        Ok(volume)
     }
 
     pub async fn create_uploaded_volume(
@@ -278,9 +283,11 @@ where
         let volume_key = volume.as_deref().and_then(normalized_volume_key);
         let is_special_edition =
             volume_key.is_none() || is_fractional_volume_key(volume_key.as_deref());
-        sqlx::query_as::<_, MangaVolumeResponse>(
+        let volume = sqlx::query_as::<_, MangaVolumeResponse>(
             "INSERT INTO manga_volumes (manga_id, file_name, storage_key, asset_id, volume, volume_key, locale, is_special_edition) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, mangadex_cover_id, file_name, source_url, storage_key, 'ready'::text AS asset_status, NULL::text AS image_url, NULL::text AS thumbnail_storage_key, NULL::text AS thumbnail_url, volume, volume_key, locale, is_special_edition, source_created_at, source_updated_at, updated_at",
-        ).bind(manga.id).bind(file_name).bind(storage_key).bind(asset_id).bind(volume).bind(volume_key).bind(locale).bind(is_special_edition).fetch_one(&self.pool).await.map_err(map_unique_violation)
+        ).bind(manga.id).bind(file_name).bind(storage_key).bind(asset_id).bind(volume).bind(volume_key).bind(locale).bind(is_special_edition).fetch_one(&self.pool).await.map_err(map_unique_violation)?;
+        invalidate_volume_sync(&self.pool, manga.id).await?;
+        Ok(volume)
     }
 
     pub async fn update_manga(
@@ -349,6 +356,7 @@ where
         .execute(&self.pool)
         .await
         .map_err(map_unique_violation)?;
+        invalidate_volume_sync(&self.pool, manga.id).await?;
 
         load_manga_response(&self.pool, &manga.id.to_string(), None)
             .await?
@@ -435,6 +443,7 @@ where
         .await
         .map_err(map_unique_violation)?;
         tx.commit().await?;
+        invalidate_volume_sync(&self.pool, manga.id).await?;
         Ok(volume)
     }
 
@@ -456,6 +465,7 @@ where
         if deleted.rows_affected() == 0 {
             return Err(ApiError::VolumeNotFound);
         }
+        invalidate_volume_sync(&self.pool, manga.id).await?;
         Ok(())
     }
 
@@ -1378,7 +1388,17 @@ async fn volumes_are_stale(pool: &PgPool, manga_id: Uuid) -> Result<bool, sqlx::
     .await?
     .flatten();
 
-    Ok(last_success.is_none_or(|synced| synced < Utc::now() - Duration::days(1)))
+    Ok(last_success.is_none_or(|synced| synced < Utc::now() - VOLUME_SYNC_TTL))
+}
+
+async fn invalidate_volume_sync(pool: &PgPool, manga_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE manga_source_syncs SET volumes_last_checked_at = NULL, volumes_last_success_at = NULL, volumes_last_error = NULL WHERE manga_id = $1",
+    )
+    .bind(manga_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn upsert_volume(

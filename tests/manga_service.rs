@@ -478,6 +478,76 @@ async fn forced_volume_refresh_reconciles_removed_covers() {
     cleanup_manga(&pool, mangadex_id).await;
 }
 
+#[tokio::test]
+async fn volume_sync_is_reused_for_six_hours() {
+    let pool = test_pool().await;
+    let mangadex_id = Uuid::parse_str("99999999-9999-9999-9999-999999999999").unwrap();
+    cleanup_manga(&pool, mangadex_id).await;
+    let manga_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO mangas (mangadex_id, slug, primary_title, mangadex_last_volume, last_synced_at)
+        VALUES ($1, 'volume-sync-99999999', 'Volume Sync', '1', now())
+        RETURNING id
+        "#,
+    )
+    .bind(mangadex_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO manga_volumes (manga_id, file_name, source_url, volume, volume_key, locale, is_special_edition)
+        VALUES ($1, 'local-volume.jpg', 'https://example.com/local-volume.jpg', '1', '1', 'ja', false)
+        "#,
+    )
+    .bind(manga_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO manga_source_syncs (manga_id, source, source_id, volumes_last_checked_at, volumes_last_success_at)
+        VALUES ($1, 'mangadex', $2, now() - interval '5 hours 59 minutes', now() - interval '5 hours 59 minutes')
+        "#,
+    )
+    .bind(manga_id)
+    .bind(mangadex_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let fake = FakeMangaDex {
+        calls: Arc::default(),
+        search_results: Vec::new(),
+        covers: vec![manga_cover("f2010201-0201-0201-0201-020102010201", "2")],
+    };
+    let service = MangaService::new(pool.clone(), fake.clone());
+
+    service
+        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, false, None)
+        .await
+        .unwrap();
+    assert!(fake.calls.lock().unwrap().is_empty());
+
+    sqlx::query(
+        "UPDATE manga_source_syncs SET volumes_last_success_at = now() - interval '6 hours 1 minute' WHERE manga_id = $1",
+    )
+    .bind(manga_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    service
+        .get_manga_volumes(&mangadex_id.to_string(), 50, 0, false, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.calls.lock().unwrap().as_slice(),
+        ["list_covers:99999999-9999-9999-9999-999999999999"]
+    );
+
+    cleanup_manga(&pool, mangadex_id).await;
+}
+
 async fn test_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://mangako:mangako@localhost:5432/mangako_api".to_string());

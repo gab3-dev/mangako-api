@@ -60,7 +60,7 @@ Production startup enables structured request logs and an in-memory response cac
 Default settings:
 
 ```env
-CACHE_TTL_SECONDS=60
+CACHE_TTL_SECONDS=600
 CACHE_MAX_ENTRIES=1000
 CACHE_MAX_BYTES=67108864
 RUST_LOG=mangako_api=info,tower_http=info
@@ -70,6 +70,7 @@ RUST_LOG=mangako_api=info,tower_http=info
 - Responses larger than the total byte budget include `X-Cache: BYPASS` and are not stored.
 - `CACHE_TTL_SECONDS=0` disables response caching.
 - Searches without a title use a response-specific cache TTL of 6 hours.
+- MangaDex volume synchronization is cached per manga for 6 hours and is invalidated by local catalog edits.
 - Requests with `refresh=true` bypass and invalidate cached pages for that endpoint.
 - `GET /stats/mangadex-fallback` requires an API token and reports `catalogRequests`, `fallbackRequests`, and `fallbackRate` since the API process started. A request counts as a fallback at most once, including when serving stale local manga or volumes after MangaDex fails.
 - `GET /stats/requests` requires the read token and reports seven-day totals for catalog API requests plus MangaDex attempts, successes, and failures. Metrics are aggregated by UTC hour and survive API restarts.

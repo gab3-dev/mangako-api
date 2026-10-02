@@ -35,7 +35,7 @@ impl Config {
                 message: "must differ from API_READ_TOKEN".to_string(),
             });
         }
-        let cache_ttl_seconds = env_or("CACHE_TTL_SECONDS", 60)?;
+        let cache_ttl_seconds = env_or("CACHE_TTL_SECONDS", 10 * 60)?;
         let cache_max_entries = env_or("CACHE_MAX_ENTRIES", 1_000)?;
         let cache_max_bytes = env_or("CACHE_MAX_BYTES", 64 * 1024 * 1024)?;
         let max_json_body_bytes = env_or("MAX_JSON_BODY_BYTES", 64 * 1024)?;
