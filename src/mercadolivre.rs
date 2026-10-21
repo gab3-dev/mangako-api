@@ -41,7 +41,7 @@ impl MercadoLivreClient {
                 message: "title must contain between 1 and 180 characters".to_string(),
             });
         }
-        if volume.is_some_and(|number| !number.is_finite() || number < 0.0 || number > 9999.0) {
+        if volume.is_some_and(|number| !number.is_finite() || !(0.0..=9999.0).contains(&number)) {
             return Err(ApiError::BadRequest {
                 message: "volume must be a number between 0 and 9999".to_string(),
             });
