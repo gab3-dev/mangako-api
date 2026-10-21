@@ -35,11 +35,12 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
             {}
         }
     });
-    let app = operations::with_observability(api::router_with_mangadex_proxy(
+    let app = operations::with_observability(api::router_with_mercadolivre_proxy(
         pool,
         config.auth,
         config.operations,
         config.cover_storage,
+        config.mercadolivre_access_token,
         config.mangadex_proxy_url,
     ));
 

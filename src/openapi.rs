@@ -9,6 +9,7 @@ use crate::{
         MangaCreatorResponse, MangaLocalizationResponse, MangaResponse, MangaVolumeResponse,
         UpdateMangaRequest, UpdateMangaVolumeRequest,
     },
+    mercadolivre::{Offer, OffersResponse},
     operations::{FallbackStatsResponse, RequestMetricsResponse},
 };
 
@@ -33,7 +34,8 @@ use crate::{
         crate::manga::update_manga_volume,
         crate::manga::delete_manga_volume,
         crate::manga::mangadex_fallback_stats,
-        crate::manga::request_metrics
+        crate::manga::request_metrics,
+        crate::shopping::search_mercadolivre_offers
     ),
     components(
         schemas(
@@ -52,12 +54,15 @@ use crate::{
             MangaResponse,
             MangaVolumeResponse,
             FallbackStatsResponse,
-            RequestMetricsResponse
+            RequestMetricsResponse,
+            Offer,
+            OffersResponse
         )
     ),
     modifiers(&SecurityAddon),
     tags(
-        (name = "manga", description = "Manga catalog search and detail endpoints")
+        (name = "manga", description = "Manga catalog search and detail endpoints"),
+        (name = "shopping", description = "Shopping offer search")
     )
 )]
 pub struct ApiDoc;

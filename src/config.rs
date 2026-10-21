@@ -16,6 +16,7 @@ pub struct Config {
     pub operations: OperationalConfig,
     pub cover_storage: CoverStorage,
     pub mangadex_proxy_url: Option<Url>,
+    pub mercadolivre_access_token: Option<String>,
 }
 
 impl Config {
@@ -48,6 +49,9 @@ impl Config {
             .unwrap_or_else(|_| "http://localhost:3000/media".to_string());
         let cover_max_upload_bytes = env_or("MAX_COVER_UPLOAD_BYTES", 8 * 1024 * 1024)?;
         let mangadex_proxy_url = optional_http_url("MANGADEX_PROXY_URL")?;
+        let mercadolivre_access_token = env::var("MERCADOLIBRE_ACCESS_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
 
         if cache_ttl_seconds > 0 {
             if cache_max_entries == 0 {
@@ -110,6 +114,7 @@ impl Config {
                 cover_max_upload_bytes,
             ),
             mangadex_proxy_url,
+            mercadolivre_access_token,
         })
     }
 }

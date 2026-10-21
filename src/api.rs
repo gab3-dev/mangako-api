@@ -15,8 +15,10 @@ use crate::{
     manga,
     manga_service::MangaService,
     mangadex::{self, MangaDexClient},
+    mercadolivre::MercadoLivreClient,
     openapi::ApiDoc,
     operations::{FallbackMetrics, OperationalConfig, RateLimiter, RequestMetrics, ResponseCache},
+    shopping,
 };
 
 #[derive(Clone)]
@@ -25,10 +27,11 @@ pub struct AppState {
     pub fallback_metrics: FallbackMetrics,
     pub request_metrics: RequestMetrics,
     pub cover_storage: Option<CoverStorage>,
+    pub mercadolivre_client: Option<MercadoLivreClient>,
 }
 
 pub fn router(pool: PgPool) -> Router {
-    build_router(pool, None, OperationalConfig::default(), None, None)
+    build_router(pool, None, OperationalConfig::default(), None, None, None)
 }
 
 pub fn router_with_api_tokens(pool: PgPool, read_token: String, write_token: String) -> Router {
@@ -41,6 +44,7 @@ pub fn router_with_api_tokens(pool: PgPool, read_token: String, write_token: Str
         OperationalConfig::default(),
         None,
         None,
+        None,
     )
 }
 
@@ -49,7 +53,7 @@ pub fn router_with_operations(
     auth: AuthConfig,
     operations: OperationalConfig,
 ) -> Router {
-    build_router(pool, Some(auth), operations, None, None)
+    build_router(pool, Some(auth), operations, None, None, None)
 }
 
 pub fn router_with_cover_storage(
@@ -74,7 +78,70 @@ pub fn router_with_mangadex_proxy(
         operations,
         Some(cover_storage),
         mangadex_proxy_url,
+        None,
     )
+}
+
+pub fn router_with_mercadolivre(
+    pool: PgPool,
+    auth: AuthConfig,
+    operations: OperationalConfig,
+    cover_storage: CoverStorage,
+    access_token: Option<String>,
+) -> Router {
+    router_with_mercadolivre_proxy(pool, auth, operations, cover_storage, access_token, None)
+}
+
+pub fn router_with_mercadolivre_proxy(
+    pool: PgPool,
+    auth: AuthConfig,
+    operations: OperationalConfig,
+    cover_storage: CoverStorage,
+    access_token: Option<String>,
+    mangadex_proxy_url: Option<reqwest::Url>,
+) -> Router {
+    build_router(
+        pool,
+        Some(auth),
+        operations,
+        Some(cover_storage),
+        mangadex_proxy_url,
+        Some(MercadoLivreClient::new(
+            marketplace_http_client(),
+            access_token,
+        )),
+    )
+}
+
+pub fn router_with_mercadolivre_base_url(
+    pool: PgPool,
+    auth: AuthConfig,
+    operations: OperationalConfig,
+    cover_storage: CoverStorage,
+    access_token: Option<String>,
+    base_url: &str,
+) -> Router {
+    build_router(
+        pool,
+        Some(auth),
+        operations,
+        Some(cover_storage),
+        None,
+        Some(MercadoLivreClient::with_base_url(
+            marketplace_http_client(),
+            access_token,
+            base_url,
+        )),
+    )
+}
+
+fn marketplace_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(concat!("mangako-api/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .build()
+        .expect("valid marketplace client")
 }
 
 fn build_router(
@@ -83,6 +150,7 @@ fn build_router(
     operations: OperationalConfig,
     cover_storage: Option<CoverStorage>,
     mangadex_proxy_url: Option<reqwest::Url>,
+    mercadolivre_client: Option<MercadoLivreClient>,
 ) -> Router {
     let http = mangadex::http_client(mangadex_proxy_url, Duration::from_secs(15))
         .expect("MangaDex proxy URL is validated by Config");
@@ -102,6 +170,10 @@ fn build_router(
             get(manga::mangadex_fallback_stats),
         )
         .route("/stats/requests", get(manga::request_metrics));
+    let mut shopping = Router::new().route(
+        "/shopping/mercado-livre/offers",
+        get(shopping::search_mercadolivre_offers),
+    );
     let mut write_catalog = Router::new()
         .route("/mangas", post(manga::create_manga))
         .route(
@@ -160,6 +232,10 @@ fn build_router(
         request_metrics.clone(),
         crate::operations::track_api_request,
     ));
+    shopping = shopping.layer(middleware::from_fn_with_state(
+        request_metrics.clone(),
+        crate::operations::track_api_request,
+    ));
     let limiter = RateLimiter::new(operations.rate_limit);
     read_catalog = read_catalog.layer(middleware::from_fn_with_state(
         limiter.clone(),
@@ -170,6 +246,10 @@ fn build_router(
         crate::operations::rate_limit_request,
     ));
     write_catalog = write_catalog.layer(middleware::from_fn_with_state(
+        limiter.clone(),
+        crate::operations::rate_limit_request,
+    ));
+    shopping = shopping.layer(middleware::from_fn_with_state(
         limiter,
         crate::operations::rate_limit_request,
     ));
@@ -183,6 +263,10 @@ fn build_router(
             auth::require_write_token,
         ));
         stats = stats.layer(middleware::from_fn_with_state(
+            auth.clone(),
+            auth::require_read_token,
+        ));
+        shopping = shopping.layer(middleware::from_fn_with_state(
             auth,
             auth::require_read_token,
         ));
@@ -194,11 +278,13 @@ fn build_router(
         .merge(read_catalog)
         .merge(write_catalog)
         .merge(stats)
+        .merge(shopping)
         .with_state(AppState {
             manga_service,
             fallback_metrics,
             request_metrics,
             cover_storage,
+            mercadolivre_client,
         })
 }
 

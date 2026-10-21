@@ -108,6 +108,23 @@ Back up the `cover-data` Docker volume together with PostgreSQL. Removing that v
 
 ## Endpoints
 
+### Mercado Livre offers
+
+`GET /shopping/mercado-livre/offers?title=Frieren&volume=15&locale=pt-BR`
+accepts the existing API read token and returns a camelCase response with
+`query`, `fetchedAt`, `volumeSpecific`, and `offers`. Each offer includes the
+listing ID, catalog title, price, optional original price/discount, currency,
+thumbnail, condition, and an official product page link.
+
+Configure `MERCADOLIBRE_ACCESS_TOKEN` only on the backend. It is optional:
+without it the shopping route returns `503`, while existing catalog routes
+remain available. Upstream errors return `502`. OAuth token renewal is not
+automated; replace the access token when it expires and recreate the API service.
+The client uses `products/search` and `products/{id}/items`; product-page links
+show the catalog product rather than guaranteeing selection of a particular seller.
+
+### Catalog
+
 - `GET /docs`: Swagger UI.
 - `GET /api-docs/openapi.json`: OpenAPI JSON specification.
 - `GET /health`: returns `ok`.

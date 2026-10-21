@@ -38,6 +38,10 @@ pub enum ApiError {
     VolumeNotFound,
     #[error("cover storage is unavailable")]
     CoverStorageUnavailable,
+    #[error("Mercado Livre access is not configured")]
+    MercadoLivreUnavailable,
+    #[error("Mercado Livre is temporarily unavailable")]
+    MercadoLivreUpstream,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -58,6 +62,10 @@ impl IntoResponse for ApiError {
             Self::CoverStorageUnavailable => {
                 (StatusCode::SERVICE_UNAVAILABLE, "cover_storage_unavailable")
             }
+            Self::MercadoLivreUnavailable => {
+                (StatusCode::SERVICE_UNAVAILABLE, "mercadolivre_unavailable")
+            }
+            Self::MercadoLivreUpstream => (StatusCode::BAD_GATEWAY, "mercadolivre_upstream_error"),
             Self::MangaDex(MangaDexError::CircuitOpen) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "mangadex_unavailable")
             }
