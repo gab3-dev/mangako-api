@@ -42,6 +42,8 @@ pub enum ApiError {
     MercadoLivreUnavailable,
     #[error("Mercado Livre is temporarily unavailable")]
     MercadoLivreUpstream,
+    #[error("Mercado Livre authorization is unavailable; renewal or reauthorization is required")]
+    MercadoLivreOAuthUnavailable,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -66,6 +68,10 @@ impl IntoResponse for ApiError {
                 (StatusCode::SERVICE_UNAVAILABLE, "mercadolivre_unavailable")
             }
             Self::MercadoLivreUpstream => (StatusCode::BAD_GATEWAY, "mercadolivre_upstream_error"),
+            Self::MercadoLivreOAuthUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "mercadolivre_authorization_unavailable",
+            ),
             Self::MangaDex(MangaDexError::CircuitOpen) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "mangadex_unavailable")
             }

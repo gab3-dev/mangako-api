@@ -6,6 +6,7 @@ use crate::{
     auth::AuthConfig,
     cover_storage::CoverStorage,
     error::ApiError,
+    mercadolivre_oauth::MercadoLivreOAuthConfig,
     operations::{CacheConfig, OperationalConfig, RateLimitConfig},
 };
 
@@ -17,6 +18,7 @@ pub struct Config {
     pub cover_storage: CoverStorage,
     pub mangadex_proxy_url: Option<Url>,
     pub mercadolivre_access_token: Option<String>,
+    pub mercadolivre_oauth: Option<MercadoLivreOAuthConfig>,
 }
 
 impl Config {
@@ -52,6 +54,7 @@ impl Config {
         let mercadolivre_access_token = env::var("MERCADOLIBRE_ACCESS_TOKEN")
             .ok()
             .filter(|value| !value.trim().is_empty());
+        let mercadolivre_oauth = oauth_config(mercadolivre_access_token.clone())?;
 
         if cache_ttl_seconds > 0 {
             if cache_max_entries == 0 {
@@ -115,8 +118,63 @@ impl Config {
             ),
             mangadex_proxy_url,
             mercadolivre_access_token,
+            mercadolivre_oauth,
         })
     }
+}
+
+fn oauth_config(
+    initial_access_token: Option<String>,
+) -> Result<Option<MercadoLivreOAuthConfig>, ApiError> {
+    let client_id = optional_credential("MERCADOLIBRE_CLIENT_ID")?;
+    let client_secret = optional_credential("MERCADOLIBRE_CLIENT_SECRET")?;
+    if client_id.is_none() && client_secret.is_none() {
+        return Ok(None);
+    }
+    let client_id = client_id.ok_or(ApiError::MissingEnv {
+        name: "MERCADOLIBRE_CLIENT_ID",
+    })?;
+    let client_secret = client_secret.ok_or(ApiError::MissingEnv {
+        name: "MERCADOLIBRE_CLIENT_SECRET",
+    })?;
+    let initial_refresh_token = optional_credential("MERCADOLIBRE_REFRESH_TOKEN")?;
+    let initial_expires_at = optional_credential("MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT")?
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .map(|date| date.with_timezone(&chrono::Utc))
+                .map_err(|_| ApiError::InvalidEnv {
+                    name: "MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT",
+                    message: "must be an RFC3339 timestamp".to_string(),
+                })
+        })
+        .transpose()?;
+    Ok(Some(MercadoLivreOAuthConfig {
+        client_id,
+        client_secret,
+        initial_access_token,
+        initial_refresh_token,
+        initial_expires_at,
+    }))
+}
+
+fn optional_credential(name: &'static str) -> Result<Option<String>, ApiError> {
+    let Some(value) = env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if value.len() > 16_384
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+    {
+        return Err(ApiError::InvalidEnv {
+            name,
+            message: "must be bounded and contain no whitespace or control characters".to_string(),
+        });
+    }
+    Ok(Some(value))
 }
 
 fn optional_http_url(name: &'static str) -> Result<Option<Url>, ApiError> {

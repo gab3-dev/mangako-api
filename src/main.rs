@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use mangako_api::{api, config::Config, db, mangadex, operations};
+use mangako_api::{mercadolivre::MercadoLivreClient, mercadolivre_oauth::MercadoLivreOAuth};
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -35,13 +36,27 @@ async fn main() -> Result<(), mangako_api::error::ApiError> {
             {}
         }
     });
-    let app = operations::with_observability(api::router_with_mercadolivre_proxy(
+    let marketplace_http = reqwest::Client::builder()
+        .user_agent(concat!("mangako-api/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("valid marketplace HTTP client");
+    let mut marketplace =
+        MercadoLivreClient::new(marketplace_http.clone(), config.mercadolivre_access_token);
+    if let Some(oauth_config) = config.mercadolivre_oauth {
+        let oauth = MercadoLivreOAuth::new(pool.clone(), marketplace_http, oauth_config);
+        oauth.initialize().await?;
+        tokio::spawn(oauth.clone().run_refresh_loop());
+        marketplace = marketplace.using_oauth(oauth);
+    }
+    let app = operations::with_observability(api::router_with_marketplace_client(
         pool,
         config.auth,
         config.operations,
         config.cover_storage,
-        config.mercadolivre_access_token,
         config.mangadex_proxy_url,
+        marketplace,
     ));
 
     let listener = TcpListener::bind(config.http_addr).await?;

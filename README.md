@@ -117,9 +117,37 @@ listing ID, catalog title, price, optional original price/discount, currency,
 thumbnail, condition, and an official product page link.
 
 Configure `MERCADOLIBRE_ACCESS_TOKEN` only on the backend. It is optional:
-without it the shopping route returns `503`, while existing catalog routes
-remain available. Upstream errors return `502`. OAuth token renewal is not
-automated; replace the access token when it expires and recreate the API service.
+without credentials the shopping route returns `503`, while existing catalog
+routes remain available. Upstream errors return `502`.
+
+#### Automatic OAuth renewal
+
+For unattended operation, configure `MERCADOLIBRE_CLIENT_ID` and
+`MERCADOLIBRE_CLIENT_SECRET` on the backend. Seed a new installation with the
+latest `MERCADOLIBRE_REFRESH_TOKEN` and optionally `MERCADOLIBRE_ACCESS_TOKEN`
+and its RFC3339 `MERCADOLIBRE_ACCESS_TOKEN_EXPIRES_AT`. If expiry is unknown,
+the backend renews immediately to learn it. The user authorization must include
+`offline_access`. Never distribute these credentials to Android clients.
+
+The private `mercadolivre_oauth_tokens` PostgreSQL table is the source of truth
+after bootstrap. Rotated access/refresh tokens and expiry are committed together
+before use. Startup never overwrites persisted tokens with stale environment
+values. Keep the PostgreSQL volume/backups private; they contain OAuth secrets.
+
+A server task checks expiry every 30 seconds and renews within the final minute.
+Requests also check expiry and refresh once on an upstream `401`, retrying the
+GET at most once. Database row locking coordinates API instances and concurrent
+requests. Failed exchanges have a 60-second cooldown; `invalid_grant`,
+`invalid_client` and `unauthorized_client` require operator intervention and
+are not retried indefinitely. OAuth failures return a credential-free `503`.
+
+If the account revokes authorization, obtain a new authorization-code grant,
+update the seed environment values, stop all API instances, remove only the
+affected client ID from `mercadolivre_oauth_tokens`, and restart the API to
+bootstrap the new grant. Do not reuse refresh tokens from old `.env` files:
+Mercado Livre refresh tokens are single-use and rotate on each exchange.
+
+Without client ID/secret, static access-token mode remains supported.
 An optional `mangaRef` (MangaKo ID, slug or MangaDex ID) resolves localized
 display titles through the local catalog. The client searches the books domain
 by series name, then checks the series and exact volume locally. Products with

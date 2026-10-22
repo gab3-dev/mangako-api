@@ -135,6 +135,24 @@ pub fn router_with_mercadolivre_base_url(
     )
 }
 
+pub fn router_with_marketplace_client(
+    pool: PgPool,
+    auth: AuthConfig,
+    operations: OperationalConfig,
+    cover_storage: CoverStorage,
+    mangadex_proxy_url: Option<reqwest::Url>,
+    marketplace: MercadoLivreClient,
+) -> Router {
+    build_router(
+        pool,
+        Some(auth),
+        operations,
+        Some(cover_storage),
+        mangadex_proxy_url,
+        Some(marketplace),
+    )
+}
+
 fn marketplace_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("mangako-api/", env!("CARGO_PKG_VERSION")))

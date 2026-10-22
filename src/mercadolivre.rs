@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::error::ApiError;
+use crate::mercadolivre_oauth::MercadoLivreOAuth;
 
 const DEFAULT_API_BASE_URL: &str = "https://api.mercadolibre.com/";
 
@@ -11,6 +12,7 @@ const DEFAULT_API_BASE_URL: &str = "https://api.mercadolibre.com/";
 pub struct MercadoLivreClient {
     http: Client,
     access_token: Option<String>,
+    oauth: Option<MercadoLivreOAuth>,
     base_url: Url,
 }
 
@@ -25,8 +27,48 @@ impl MercadoLivreClient {
             access_token: access_token
                 .map(|token| token.trim().to_string())
                 .filter(|token| !token.is_empty()),
+            oauth: None,
             base_url: Url::parse(base_url).expect("valid Mercado Livre API base URL"),
         }
+    }
+
+    pub fn using_oauth(mut self, oauth: MercadoLivreOAuth) -> Self {
+        self.oauth = Some(oauth);
+        self
+    }
+
+    async fn authorized_get(&self, url: Url) -> Result<reqwest::Response, ApiError> {
+        let token = if let Some(oauth) = &self.oauth {
+            oauth.access_token().await?
+        } else {
+            self.access_token
+                .clone()
+                .ok_or(ApiError::MercadoLivreUnavailable)?
+        };
+        let response = self
+            .http
+            .get(url.clone())
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|_| ApiError::MercadoLivreUpstream)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            && let Some(oauth) = &self.oauth
+        {
+            let refreshed = oauth.after_unauthorized(&token).await?;
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(&refreshed)
+                .send()
+                .await
+                .map_err(|_| ApiError::MercadoLivreUpstream)?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                oauth.mark_rejected(&refreshed).await?;
+            }
+            return Ok(response);
+        }
+        Ok(response)
     }
 
     pub async fn search_offers(
@@ -47,10 +89,6 @@ impl MercadoLivreClient {
             });
         }
 
-        let token = self
-            .access_token
-            .as_deref()
-            .ok_or(ApiError::MercadoLivreUnavailable)?;
         let query = build_search_query(title, volume, locale);
         let series_title = title.split(':').next().unwrap_or(title).trim();
         let mut url = self
@@ -64,16 +102,7 @@ impl MercadoLivreClient {
             .append_pair("q", series_title)
             .append_pair("limit", "50");
 
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|error| {
-                tracing::warn!(error = %error, "Mercado Livre search request failed");
-                ApiError::MercadoLivreUpstream
-            })?;
+        let response = self.authorized_get(url).await?;
         if !response.status().is_success() {
             tracing::warn!(status = %response.status(), "Mercado Livre search returned an error");
             return Err(ApiError::MercadoLivreUpstream);
@@ -94,7 +123,7 @@ impl MercadoLivreClient {
 
         let mut offers = Vec::new();
         for product in products.into_iter().take(6) {
-            let items = self.get_product_items(token, &product.id).await?;
+            let items = self.get_product_items(&product.id).await?;
             offers.extend(
                 items
                     .into_iter()
@@ -114,25 +143,12 @@ impl MercadoLivreClient {
         })
     }
 
-    async fn get_product_items(
-        &self,
-        token: &str,
-        product_id: &str,
-    ) -> Result<Vec<CatalogItem>, ApiError> {
+    async fn get_product_items(&self, product_id: &str) -> Result<Vec<CatalogItem>, ApiError> {
         let url = self
             .base_url
             .join(&format!("products/{product_id}/items"))
             .expect("valid Mercado Livre product items URL");
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(|error| {
-                tracing::warn!(error = %error, product_id, "Mercado Livre product items request failed");
-                ApiError::MercadoLivreUpstream
-            })?;
+        let response = self.authorized_get(url).await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }

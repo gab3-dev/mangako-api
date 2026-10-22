@@ -8,6 +8,7 @@ pub mod manga;
 pub mod manga_service;
 pub mod mangadex;
 pub mod mercadolivre;
+pub mod mercadolivre_oauth;
 pub mod openapi;
 pub mod operations;
 pub mod shopping;
