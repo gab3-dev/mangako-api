@@ -52,6 +52,7 @@ impl MercadoLivreClient {
             .as_deref()
             .ok_or(ApiError::MercadoLivreUnavailable)?;
         let query = build_search_query(title, volume, locale);
+        let series_title = title.split(':').next().unwrap_or(title).trim();
         let mut url = self
             .base_url
             .join("products/search")
@@ -59,8 +60,9 @@ impl MercadoLivreClient {
         url.query_pairs_mut()
             .append_pair("status", "active")
             .append_pair("site_id", "MLB")
-            .append_pair("q", &query)
-            .append_pair("limit", "10");
+            .append_pair("domain_id", "MLB-BOOKS")
+            .append_pair("q", series_title)
+            .append_pair("limit", "50");
 
         let response = self
             .http
@@ -84,30 +86,25 @@ impl MercadoLivreClient {
         let mut products = result
             .results
             .into_iter()
+            .filter(|product| product.is_manga_candidate())
+            .filter(|product| product.matches_title(series_title))
             .filter(|product| volume.is_none_or(|number| product.matches_volume(number)))
             .collect::<Vec<_>>();
-        if products
-            .iter()
-            .any(|product| product.title_match_count(title) > 0)
-        {
-            products.retain(|product| product.title_match_count(title) > 0);
-        }
-        products.sort_by_key(|product| std::cmp::Reverse(product.title_match_count(title)));
+        products.sort_by_key(|product| std::cmp::Reverse(product.title_match_count(series_title)));
 
         let mut offers = Vec::new();
-        for product in products {
-            if offers.len() >= 20 {
-                break;
-            }
+        for product in products.into_iter().take(6) {
             let items = self.get_product_items(token, &product.id).await?;
             offers.extend(
                 items
                     .into_iter()
-                    .filter_map(|item| Offer::from_catalog_item(&product, item))
-                    .take(20 - offers.len()),
+                    .filter_map(|item| Offer::from_catalog_item(&product, item)),
             );
         }
         offers.sort_by(|left, right| left.price.total_cmp(&right.price));
+        let mut seen = std::collections::HashSet::new();
+        offers.retain(|offer| seen.insert(offer.id.clone()));
+        offers.truncate(20);
 
         Ok(OffersResponse {
             query,
@@ -136,6 +133,9 @@ impl MercadoLivreClient {
                 tracing::warn!(error = %error, product_id, "Mercado Livre product items request failed");
                 ApiError::MercadoLivreUpstream
             })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(Vec::new());
+        }
         if !response.status().is_success() {
             tracing::warn!(status = %response.status(), product_id, "Mercado Livre product items returned an error");
             return Err(ApiError::MercadoLivreUpstream);
@@ -242,6 +242,7 @@ struct ProductSearchResponse {
 struct CatalogProduct {
     id: String,
     name: String,
+    domain_id: Option<String>,
     #[serde(default)]
     pictures: Vec<ProductPicture>,
 }
@@ -257,18 +258,63 @@ impl CatalogProduct {
     }
 
     fn matches_volume(&self, volume: f32) -> bool {
-        self.name
-            .split(|character: char| !character.is_ascii_digit() && character != '.')
-            .filter_map(|value| value.parse::<f32>().ok())
-            .any(|value| (value - volume).abs() < f32::EPSILON)
+        let name = self.name.to_lowercase().replace("vol.", "vol ");
+        let words = name
+            .split(|character: char| !character.is_alphanumeric() && character != '.')
+            .map(|word| word.trim_matches('.'))
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        let marker = words
+            .iter()
+            .position(|word| matches!(*word, "vol" | "volume" | "tomo"));
+        let numbers = &words[marker.map_or(0, |index| index + 1)..];
+        numbers
+            .iter()
+            .find_map(|value| value.parse::<f32>().ok())
+            .is_some_and(|number| (number - volume).abs() < f32::EPSILON)
+    }
+
+    fn is_manga_candidate(&self) -> bool {
+        let name = self.name.to_lowercase();
+        self.domain_id
+            .as_deref()
+            .is_none_or(|domain| domain == "MLB-BOOKS")
+            && ![
+                "guide", "art book", "artbook", "postcard", "sticker", "novel", "kit ", "box ",
+            ]
+            .iter()
+            .any(|excluded| name.contains(excluded))
+    }
+
+    fn matches_title(&self, title: &str) -> bool {
+        let required = title
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| {
+                word.chars().count() >= 3
+                    && !matches!(
+                        word.to_lowercase().as_str(),
+                        "the" | "and" | "manga" | "mangá"
+                    )
+            })
+            .count();
+        required > 0 && self.title_match_count(title) >= required
     }
 
     fn title_match_count(&self, title: &str) -> usize {
         let name = self.name.to_lowercase();
+        let words = name
+            .split(|c: char| !c.is_alphanumeric())
+            .collect::<Vec<_>>();
         title
             .split(|character: char| !character.is_alphanumeric())
-            .filter(|word| word.chars().count() >= 3)
-            .filter(|word| name.contains(&word.to_lowercase()))
+            .filter(|word| {
+                word.chars().count() >= 3
+                    && !matches!(
+                        word.to_lowercase().as_str(),
+                        "the" | "and" | "manga" | "mangá"
+                    )
+            })
+            .filter(|word| words.contains(&word.to_lowercase().as_str()))
             .count()
     }
 }
@@ -322,11 +368,31 @@ mod tests {
         let product = super::CatalogProduct {
             id: "MLB123".to_string(),
             name: "Frieren - Vol. 15".to_string(),
+            domain_id: Some("MLB-BOOKS".to_string()),
             pictures: vec![],
         };
 
         assert!(product.matches_volume(15.0));
         assert!(!product.matches_volume(1.0));
         assert_eq!(product.title_match_count("Frieren e a jornada"), 1);
+    }
+
+    #[test]
+    fn matching_rejects_other_series_and_companion_books() {
+        let mut product = super::CatalogProduct {
+            id: "MLB123".to_string(),
+            name: "Dandadan Volume 15".to_string(),
+            domain_id: Some("MLB-BOOKS".to_string()),
+            pictures: vec![],
+        };
+        assert!(!product.matches_title("Frieren"));
+        product.name = "Frieren e a jornada para o além - 01 - Panini 2022".to_string();
+        assert!(product.matches_title("Frieren"));
+        assert!(product.matches_volume(1.0));
+        assert!(!product.matches_volume(2022.0));
+        product.name = "Frieren Art Book Vol. 1".to_string();
+        assert!(!product.is_manga_candidate());
+        product.name = "Kit Frieren Vol. 1 e 2".to_string();
+        assert!(!product.is_manga_candidate());
     }
 }

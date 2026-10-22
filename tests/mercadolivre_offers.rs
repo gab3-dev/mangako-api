@@ -35,15 +35,30 @@ async fn upstream_search(
     Json(json!({
         "results": [
             {
+                "id": "MLB-no-listings",
+                "name": "Dragon Ball Vol. 2.5",
+                "domain_id": "MLB-BOOKS",
+                "pictures": []
+            },
+            {
                 "id": "MLB-CATALOG-123",
                 "name": "Dragon Ball Vol. 2.5",
                 "pictures": [{ "url": "https://http2.mlstatic.com/cover.jpg" }]
+            },
+            {
+                "id": "MLB-unrelated",
+                "name": "Dandadan Volume 2.5",
+                "pictures": []
             }
         ]
     }))
 }
 
-async fn upstream_product_items() -> Json<Value> {
+async fn upstream_product_items(headers: HeaderMap) -> Json<Value> {
+    assert_eq!(
+        headers.get(header::AUTHORIZATION).unwrap(),
+        "Bearer mercadolivre-test-access-token"
+    );
     Json(json!({
         "results": [
             {
@@ -149,11 +164,66 @@ async fn volume_search_authenticates_to_mercadolivre_and_returns_valid_offers() 
         captured.0.lock().unwrap().as_ref().unwrap(),
         &(
             "Bearer mercadolivre-test-access-token".to_string(),
-            "Dragon Ball mangá volume 2.5".to_string(),
+            "Dragon Ball".to_string(),
         )
     );
 
     upstream_task.abort();
+}
+
+#[tokio::test]
+async fn localized_title_uses_catalog_reference_and_missing_product_items_do_not_abort_search() {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://mangako:mangako@localhost:5432/mangako_api".to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    mangako_api::db::migrate(&pool).await.unwrap();
+    let manga_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO mangas (slug, primary_title, original_language) VALUES ($1, 'ドラゴンボール', 'ja') RETURNING id"
+    ).bind(format!("shopping-{}", uuid::Uuid::new_v4())).fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO manga_localizations (manga_id, language, title, is_primary) VALUES ($1, 'en', 'Dragon Ball: Manga Edition', true)")
+        .bind(manga_id).execute(&pool).await.unwrap();
+    let captured = CapturedRequest::default();
+    let (address, task) = start_upstream(captured.clone()).await;
+    let app = mangako_api::api::router_with_mercadolivre_base_url(
+        pool.clone(),
+        auth(),
+        OperationalConfig::default(),
+        cover_storage(),
+        Some("mercadolivre-test-access-token".to_string()),
+        &format!("http://{address}/"),
+    );
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(format!(
+                    "/shopping/mercado-livre/offers?title=Localized&volume=2.5&mangaRef={manga_id}"
+                ))
+                .header(header::AUTHORIZATION, "Bearer test-read-token")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["offers"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        captured.0.lock().unwrap().as_ref().unwrap().1,
+        "Dragon Ball"
+    );
+    sqlx::query("DELETE FROM mangas WHERE id = $1")
+        .bind(manga_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    task.abort();
 }
 
 #[tokio::test]

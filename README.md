@@ -120,6 +120,11 @@ Configure `MERCADOLIBRE_ACCESS_TOKEN` only on the backend. It is optional:
 without it the shopping route returns `503`, while existing catalog routes
 remain available. Upstream errors return `502`. OAuth token renewal is not
 automated; replace the access token when it expires and recreate the API service.
+An optional `mangaRef` (MangaKo ID, slug or MangaDex ID) resolves localized
+display titles through the local catalog. The client searches the books domain
+by series name, then checks the series and exact volume locally. Products with
+no item collection (`404`) are skipped; unrelated series, guidebooks and bundles
+are excluded.
 The client uses `products/search` and `products/{id}/items`; product-page links
 show the catalog product rather than guaranteeing selection of a particular seller.
 
